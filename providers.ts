@@ -162,3 +162,58 @@ export function swapProviderForThread(bbProviderId: string | null | undefined): 
   if (!bbProviderId) return null;
   return SWAP_IDS.map((id) => SWAP_PROVIDERS[id]).find((p) => p.bbProviderIds.includes(bbProviderId)) ?? null;
 }
+
+// ── the Claude / Codex login this machine already uses ─────────────────────
+
+export interface LocalLogin {
+  email: string | null;
+  /** Human plan name, e.g. "Max 20x" or "Pro". */
+  plan: string | null;
+}
+
+function titleCase(word: string): string {
+  return word.charAt(0).toUpperCase() + word.slice(1);
+}
+
+/**
+ * `~/.claude/.credentials.json` carries the plan; `~/.claude.json` carries the
+ * email under `oauthAccount`. Null when there is no subscription login.
+ */
+export function readClaudeLocal(credentials: string | null, profile: string | null): LocalLogin | null {
+  if (!credentials) return null;
+  let oauth: Record<string, unknown> | undefined;
+  try {
+    oauth = (JSON.parse(credentials) as { claudeAiOauth?: Record<string, unknown> }).claudeAiOauth;
+  } catch {
+    return null;
+  }
+  if (!oauth || !str(oauth.refreshToken)) return null;
+  let email: string | null = null;
+  try {
+    const account = (JSON.parse(profile ?? "{}") as { oauthAccount?: { emailAddress?: unknown } }).oauthAccount;
+    email = str(account?.emailAddress);
+  } catch {
+    // email stays unknown
+  }
+  const tier = str(oauth.rateLimitTier);
+  const multiplier = tier ? /(\d+)x\b/i.exec(tier)?.[1] : undefined;
+  const type = str(oauth.subscriptionType);
+  const plan = type ? `${titleCase(type)}${multiplier ? ` ${multiplier}x` : ""}` : null;
+  return { email, plan };
+}
+
+/** `~/.codex/auth.json`: email and ChatGPT plan live in the id token. */
+export function readCodexLocal(auth: string | null): LocalLogin | null {
+  if (!auth) return null;
+  let tokens: Record<string, unknown> | undefined;
+  try {
+    tokens = (JSON.parse(auth) as { tokens?: Record<string, unknown> }).tokens;
+  } catch {
+    return null;
+  }
+  if (!tokens || !str(tokens.refresh_token)) return null;
+  const claims = jwtClaims(tokens.id_token);
+  const openai = claims?.["https://api.openai.com/auth"] as { chatgpt_plan_type?: unknown } | undefined;
+  const plan = str(openai?.chatgpt_plan_type);
+  return { email: str(claims?.email), plan: plan ? titleCase(plan) : null };
+}

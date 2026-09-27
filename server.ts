@@ -37,7 +37,10 @@ import {
   SWAP_PROVIDERS,
   type SwapProvider,
   type SwapProviderId,
+  type LocalLogin,
   isSwapId,
+  readClaudeLocal,
+  readCodexLocal,
   swapProviderForThread,
 } from "./providers.js";
 
@@ -91,6 +94,12 @@ const poolAccountSchema = z.object({
   error: z.string().nullable(),
 });
 
+const localLoginSchema = z.object({
+  email: z.string().nullable(),
+  plan: z.string().nullable(),
+  inStack: z.boolean(),
+});
+
 const overviewSchema = z.object({
   now: z.number(),
   autoSwitch: z.boolean(),
@@ -110,7 +119,8 @@ const overviewSchema = z.object({
     routing: z.object({ claude: z.boolean(), codex: z.boolean() }),
     accounts: z.array(poolAccountSchema),
     error: z.string().nullable(),
-    localLogin: z.object({ claude: z.boolean(), codex: z.boolean() }),
+    /** The subscription this machine's Claude Code / Codex CLI is signed into. */
+    localLogin: z.object({ claude: localLoginSchema.nullable(), codex: localLoginSchema.nullable() }),
   }),
   login: loginSchema.nullable(),
 });
@@ -666,11 +676,28 @@ export default async function plugin(bb: BbPluginApi) {
     };
   }
 
-  async function exists(file: string): Promise<boolean> {
-    return fs.access(file).then(
-      () => true,
-      () => false,
-    );
+  async function readOptional(file: string): Promise<string | null> {
+    return fs.readFile(file, "utf8").catch(() => null);
+  }
+
+  async function localLogins(accounts: PoolAccount[]) {
+    const home = os.homedir();
+    const [claudeCreds, claudeProfile, codexAuth] = await Promise.all([
+      readOptional(path.join(home, ".claude", ".credentials.json")),
+      readOptional(path.join(home, ".claude.json")),
+      readOptional(path.join(home, ".codex", "auth.json")),
+    ]);
+    const mark = (provider: PoolProviderId, local: LocalLogin | null) =>
+      local && {
+        ...local,
+        inStack: accounts.some(
+          (a) => a.provider === provider && local.email !== null && a.email?.toLowerCase() === local.email.toLowerCase(),
+        ),
+      };
+    return {
+      claude: mark("claude", readClaudeLocal(claudeCreds, claudeProfile)),
+      codex: mark("codex", readCodexLocal(codexAuth)),
+    };
   }
 
   bb.rpc.register(rpcContract, {
@@ -726,10 +753,7 @@ export default async function plugin(bb: BbPluginApi) {
           routing: view.routing,
           accounts: view.accounts.map(toPoolAccount),
           error: view.error,
-          localLogin: {
-            claude: await exists(path.join(os.homedir(), ".claude", ".credentials.json")),
-            codex: await exists(path.join(os.homedir(), ".codex", "auth.json")),
-          },
+          localLogin: await localLogins(view.accounts),
         },
         login,
       };

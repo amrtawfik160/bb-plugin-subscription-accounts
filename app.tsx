@@ -67,7 +67,7 @@ interface Overview {
     routing: Record<PoolId, boolean>;
     accounts: PoolAccount[];
     error: string | null;
-    localLogin: Record<PoolId, boolean>;
+    localLogin: Record<PoolId, { email: string | null; plan: string | null; inStack: boolean } | null>;
   };
   login: Login | null;
 }
@@ -553,6 +553,46 @@ const POOL_STATUS: Record<PoolAccount["status"], { text: string; tone: "good" | 
   disabled: { text: "Off", tone: "idle" },
 };
 
+/** The subscription this machine's CLI is signed into, with a one-click add. */
+function MachineLogin({ provider, label, data, rpc, run }: { provider: PoolId; label: string; data: Overview; rpc: Rpc; run: Run }) {
+  const local = data.pool.localLogin[provider];
+  if (!local) {
+    return (
+      <Notice>
+        <span className="text-muted-foreground">
+          This machine isn't signed in to a {label} subscription. Add an account below to sign one in.
+        </span>
+      </Notice>
+    );
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-border bg-card px-4 py-3 text-sm">
+      <div className="min-w-0 flex-1">
+        <p className="text-xs text-muted-foreground">Signed in on this machine</p>
+        <p className="flex flex-wrap items-baseline gap-x-2">
+          <span className="font-medium">{local.email ?? `${label} account`}</span>
+          {local.plan ? (
+            <span className="rounded bg-muted px-1.5 py-0.5 text-xs font-medium">{local.plan}</span>
+          ) : null}
+        </p>
+      </div>
+      {local.inStack ? (
+        <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+          <Icon name="Check" className="size-3.5" />
+          In your stack
+        </span>
+      ) : (
+        <Button
+          size="sm"
+          onClick={() => run(() => rpc.call("poolImport", { provider }), `Added ${local.email ?? label} to the stack`)}
+        >
+          Add to stack
+        </Button>
+      )}
+    </div>
+  );
+}
+
 function PoolTab({ provider, data, rpc, run }: { provider: PoolId; data: Overview; rpc: Rpc; run: Run }) {
   const label = provider === "claude" ? "Claude" : "Codex";
   const pool = data.pool;
@@ -563,13 +603,16 @@ function PoolTab({ provider, data, rpc, run }: { provider: PoolId; data: Overvie
   }
   if (!pool.enabled) {
     return (
-      <div className="space-y-3 rounded-lg border border-border bg-card p-4 text-sm">
-        <p className="font-medium">{label} accounts run through bb's Account Pooler</p>
-        <p className="text-muted-foreground">
-          The pooler sends {label} traffic to whichever saved account still has quota, so a long task keeps going when
-          one plan runs out. Turning it on changes nothing until you add an account.
-        </p>
-        <Button onClick={() => run(() => rpc.call("poolEnable"), "Account Pooler is on")}>Turn on</Button>
+      <div className="space-y-5">
+        <MachineLogin provider={provider} label={label} data={data} rpc={rpc} run={run} />
+        <div className="space-y-3 rounded-lg border border-border bg-card p-4 text-sm">
+          <p className="font-medium">{label} accounts run through bb's Account Pooler</p>
+          <p className="text-muted-foreground">
+            The pooler sends {label} traffic to whichever saved account still has quota, so a long task keeps going when
+            one plan runs out. Turning it on changes nothing until you add an account.
+          </p>
+          <Button onClick={() => run(() => rpc.call("poolEnable"), "Account Pooler is on")}>Turn on</Button>
+        </div>
       </div>
     );
   }
@@ -577,6 +620,8 @@ function PoolTab({ provider, data, rpc, run }: { provider: PoolId; data: Overvie
   return (
     <div className="space-y-5">
       {pool.error ? <Notice tone="warn">{pool.error}</Notice> : null}
+
+      <MachineLogin provider={provider} label={label} data={data} rpc={rpc} run={run} />
 
       <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-card px-4 py-3">
         <Checkbox
@@ -661,16 +706,7 @@ function PoolTab({ provider, data, rpc, run }: { provider: PoolId; data: Overvie
         </AccountList>
       </section>
 
-      <SignIn provider={provider} label={label} login={data.login} rpc={rpc} run={run}>
-        {pool.localLogin[provider] ? (
-          <Button
-            variant="outline"
-            onClick={() => run(() => rpc.call("poolImport", { provider }), `Imported this machine's ${label} login`)}
-          >
-            Import this machine's login
-          </Button>
-        ) : null}
-      </SignIn>
+      <SignIn provider={provider} label={label} login={data.login} rpc={rpc} run={run} />
     </div>
   );
 }

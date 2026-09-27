@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { SWAP_PROVIDERS, swapProviderForThread } from "./providers.js";
+import { SWAP_PROVIDERS, readClaudeLocal, readCodexLocal, swapProviderForThread } from "./providers.js";
 
 const jwt = (claims: object) => `h.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.s`;
 
@@ -58,5 +58,29 @@ describe("swapProviderForThread", () => {
     expect(swapProviderForThread("acp-cursor")?.id).toBe("cursor");
     expect(swapProviderForThread("claude-code")).toBeNull();
     expect(swapProviderForThread(null)).toBeNull();
+  });
+});
+
+describe("local Claude / Codex logins", () => {
+  it("reads the Claude plan and email", () => {
+    const creds = JSON.stringify({
+      claudeAiOauth: { refreshToken: "r", subscriptionType: "max", rateLimitTier: "default_claude_max_20x" },
+    });
+    const profile = JSON.stringify({ oauthAccount: { emailAddress: "me@x.com" } });
+    expect(readClaudeLocal(creds, profile)).toEqual({ email: "me@x.com", plan: "Max 20x" });
+    expect(readClaudeLocal(creds, null)).toEqual({ email: null, plan: "Max 20x" });
+    expect(readClaudeLocal(JSON.stringify({}), profile)).toBeNull();
+    expect(readClaudeLocal(null, profile)).toBeNull();
+  });
+
+  it("reads the Codex plan and email from the id token", () => {
+    const auth = JSON.stringify({
+      tokens: {
+        refresh_token: "r",
+        id_token: jwt({ email: "me@x.com", "https://api.openai.com/auth": { chatgpt_plan_type: "pro" } }),
+      },
+    });
+    expect(readCodexLocal(auth)).toEqual({ email: "me@x.com", plan: "Pro" });
+    expect(readCodexLocal(JSON.stringify({ OPENAI_API_KEY: "k" }))).toBeNull();
   });
 });
