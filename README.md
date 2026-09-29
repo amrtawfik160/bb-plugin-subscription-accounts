@@ -4,7 +4,9 @@ Stack several logins for each AI subscription you use in [bb](https://getbb.app)
 (Antigravity, Claude, Codex, Cursor, Grok). When one account runs out of quota,
 bb moves to the next one and carries on with the task.
 
-![Accounts tab](docs/accounts.jpg)
+![All subscriptions: cost donut, provider totals and daily usage trend](docs/all-usage.jpg)
+
+Demo screenshots use sample accounts and usage.
 
 ## What it does
 
@@ -47,7 +49,19 @@ bb moves to the next one and carries on with the task.
 - **Lets you manage the list by hand.** Reorder accounts, switch now, skip to
   the next one, clear an out-of-quota mark, or remove an account.
 
-![Adding a Grok account](docs/sign-in.jpg)
+## Demo
+
+**Account quotas and reset times**
+
+![Antigravity account with usage meters and reset countdowns](docs/accounts.jpg)
+
+**Usage trends and model breakdowns**
+
+![Claude daily token trend, period totals and model usage](docs/usage-history.jpg)
+
+**Adding an account**
+
+![Adding a Grok account with a sample device code](docs/sign-in.jpg)
 
 ## How each provider is handled
 
