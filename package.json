@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-subscription-accounts",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "type": "module",
   "engines": {
     "bb": ">=0.44",

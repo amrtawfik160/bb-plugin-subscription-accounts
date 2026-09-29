@@ -18,4 +18,13 @@ export const historySchema = z.object({
   error: z.string().nullable(),
   timeZone: z.string().optional(),
   pricingAsOf: z.number().optional(),
+  unpricedTokens: z.number().finite().nonnegative().optional(),
+  unpricedModels: z.array(z.string()).optional(),
+  scan: z
+    .object({
+      files: z.number().int().nonnegative(),
+      oversizedRecords: z.number().int().nonnegative(),
+      unreadableFiles: z.number().int().nonnegative(),
+    })
+    .optional(),
 });

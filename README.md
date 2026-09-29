@@ -20,9 +20,13 @@ bb moves to the next one and carries on with the task.
   machine's CLI records across all logins; Cursor uses each account's usage export.
   Missing costs are estimated from input, output and cache tokens at current API
   prices, marked with `~`. Reported costs are preserved; unpriced models are shown
-  separately. These are API-equivalent costs, not subscription charges.
+  separately and excluded from spend and token totals, matching OpenUsage.
+  These are API-equivalent costs, not subscription charges.
   Prices refresh hourly from LiteLLM, models.dev and the
   [OpenUsage supplement](https://github.com/robinebers/openusage), with an offline snapshot.
+  History scans all matching CLI files on the first refresh, reusing per-file
+  parsed usage across refreshes and restarts. It follows OpenUsage’s discovery,
+  streaming and deduplication rules; see [history behavior](docs/history.md).
   Antigravity's quota API has no daily history.
   Known quota windows also show a steady-pace marker and estimated time to the limit.
 - **Switches accounts automatically.** When a thread hits a plan limit, the

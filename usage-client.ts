@@ -80,6 +80,14 @@ export function createLocalUsageClient(fetcher: typeof fetch = fetch, signal?: A
   };
 }
 
+// OpenUsage's CursorSession selects the second subject component when present.
+function cursorUserId(access: string): string | null {
+  const subject = textValue(jwtClaims(access)?.sub);
+  if (!subject) return null;
+  const parts = subject.split("|");
+  return (parts.length > 1 ? parts[1] : parts[0]) || null;
+}
+
 export function createUsageClient(
   fetcher: typeof fetch = fetch,
   signal?: AbortSignal,
@@ -212,8 +220,7 @@ export function createUsageClient(
         ]);
         let mapped = mapCursor(usage, null, null, credits);
         if (!mapped.metrics.some((row) => row.label === "Plan usage" || row.label === "Included requests")) {
-          const subject = textValue(jwtClaims(access)?.sub);
-          const user = subject?.split("|").pop();
+          const user = cursorUserId(access);
           if (user) {
             const cookieHeaders = {
               Cookie: `WorkosCursorSessionToken=${encodeURIComponent(user)}%3A%3A${access}`,
@@ -233,7 +240,7 @@ export function createUsageClient(
             mapped = mapCursor(usage, summary, requests, credits);
           }
         }
-        const historyUser = textValue(jwtClaims(access)?.sub)?.split("|").pop();
+        const historyUser = cursorUserId(access);
         return {
           ...mapped,
           plan: textValue(plan?.planName ?? plan?.plan ?? object(plan?.planInfo).planName) ?? mapped.plan,

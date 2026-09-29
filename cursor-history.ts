@@ -4,52 +4,25 @@ import type { ModelPricing } from "./pricing.js";
 
 /** CSV quotes may contain commas, escaped quotes and newlines. */
 export function parseCursorHistory(csv: string, now = Date.now(), pricing?: ModelPricing): UsageHistory {
-  const rows: string[][] = [];
-  let row: string[] = [],
-    cell = "",
-    quoted = false,
-    afterQuote = false;
-  for (let i = 0; i < csv.length; i++) {
-    const ch = csv[i];
-    if (quoted) {
-      if (ch === '"' && csv[i + 1] === '"') {
-        cell += '"';
-        i++;
-      } else if (ch === '"') {
-        quoted = false;
-        afterQuote = true;
-      } else cell += ch;
-    } else if (ch === '"' && !cell && !afterQuote) quoted = true;
-    else if (ch === "," || ch === "\n") {
-      row.push(cell.replace(/\r$/, ""));
-      cell = "";
-      afterQuote = false;
-      if (ch === "\n") {
-        rows.push(row);
-        row = [];
-      }
-    } else if (afterQuote && ch !== "\r") throw new Error("Invalid usage export");
-    else cell += ch;
-  }
-  if (quoted) throw new Error("Invalid usage export");
-  if (cell || row.length) {
-    row.push(cell.replace(/\r$/, ""));
-    rows.push(row);
-  }
-  const header = rows.shift()?.map((v) => v.replace(/^\uFEFF/, "").trim()) ?? [];
   const tokenColumns = ["Input (w/ Cache Write)", "Input (w/o Cache Write)", "Cache Read", "Output Tokens"];
-  if (
-    ["Date", "Model", ...tokenColumns].some((k) => !header.includes(k)) ||
-    new Set(header).size !== header.length
-  )
-    throw new Error("Invalid usage export");
+  let header: string[] | null = null,
+    partial = false;
   const events: UsageEvent[] = [];
-  let partial = false;
-  for (const row of rows) {
-    if (row.length === 1 && !row[0].trim()) continue;
-    const value = (key: string) => row[header.indexOf(key)]?.trim();
-    const at = Date.parse(value("Date") ?? "");
-    const model = value("Model");
+  // Like OpenUsage's forEachRecord: consume each row immediately, without retaining a second CSV copy.
+  const consume = (row: string[]) => {
+    if (!header) {
+      header = row.map((v) => v.replace(/^\uFEFF/, "").trim());
+      if (
+        ["Date", "Model", ...tokenColumns].some((k) => !header!.includes(k)) ||
+        new Set(header).size !== header.length
+      )
+        throw new Error("Invalid usage export");
+      return;
+    }
+    if (row.length === 1 && !row[0].trim()) return;
+    const value = (key: string) => row[header!.indexOf(key)]?.trim();
+    const at = Date.parse(value("Date") ?? ""),
+      model = value("Model");
     const counts = tokenColumns.map((key) => {
       const raw = value(key);
       if (raw === "") return 0;
@@ -63,7 +36,7 @@ export function parseCursorHistory(csv: string, now = Date.now(), pricing?: Mode
       counts.some((n) => !Number.isSafeInteger(n) || n < 0 || n > 1e12)
     ) {
       partial = true;
-      continue;
+      return;
     }
     events.push({
       id: null,
@@ -80,7 +53,54 @@ export function parseCursorHistory(csv: string, now = Date.now(), pricing?: Mode
         cacheWrite1h: 0,
       },
     });
+  };
+  csv = csv.replace(/^\uFEFF/, "");
+  let row: string[] = [],
+    fragments: string[] = [],
+    start = 0,
+    quoted = false,
+    afterQuote = false;
+  const finishCell = (end: number) => {
+    if (!afterQuote) fragments.push(csv.slice(start, end));
+    row.push(fragments.join(""));
+    fragments = [];
+    afterQuote = false;
+  };
+  for (let i = 0; i < csv.length; i++) {
+    const ch = csv[i];
+    if (quoted) {
+      if (ch === '"' && csv[i + 1] === '"') {
+        fragments.push(csv.slice(start, i), '"');
+        i++;
+        start = i + 1;
+      } else if (ch === '"') {
+        fragments.push(csv.slice(start, i));
+        quoted = false;
+        afterQuote = true;
+        start = i + 1;
+      }
+    } else if (ch === '"' && i === start && !afterQuote) {
+      quoted = true;
+      start = i + 1;
+    } else if (ch === "," || ch === "\n" || ch === "\r") {
+      finishCell(i);
+      start = i + 1;
+      if (ch === "\n" || ch === "\r") {
+        if (ch === "\r" && csv[i + 1] === "\n") {
+          i++;
+          start = i + 1;
+        }
+        consume(row);
+        row = [];
+      }
+    } else if (afterQuote || ch === '"') throw new Error("Invalid usage export");
   }
+  if (quoted) throw new Error("Invalid usage export");
+  if (start < csv.length || row.length || fragments.length || afterQuote) {
+    finishCell(csv.length);
+    consume(row);
+  }
+  if (!header) throw new Error("Invalid usage export");
   return aggregateHistory(events, now, "cursor", partial, pricing);
 }
 
@@ -97,7 +117,7 @@ export async function fetchCursorHistory(
     strategy: "tokens",
   });
   try {
-    const timeout = AbortSignal.timeout(15_000);
+    const timeout = AbortSignal.timeout(30_000);
     const response = await fetcher(`https://cursor.com/api/dashboard/export-usage-events-csv?${params}`, {
       headers: { Cookie: cookie, Accept: "text/csv" },
       redirect: "error",
@@ -105,15 +125,12 @@ export async function fetchCursorHistory(
     });
     if (!response.ok || !response.body) throw new Error("Unavailable");
     const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let csv = "",
-      bytes = 0;
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    let csv = "";
     try {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
-        bytes += value.byteLength;
-        if (bytes > 16 * 1024 * 1024) throw new Error("Export too large");
         csv += decoder.decode(value, { stream: true });
       }
       csv += decoder.decode();

@@ -35,6 +35,7 @@ import { type PoolAccount, pooler } from "./pooler.js";
 import { UsageCache, usageSchema, UsageError } from "./usage.js";
 import { createLocalUsageClient, createUsageClient } from "./usage-client.js";
 import { HistoryCache } from "./history.js";
+import { sqliteHistoryStore } from "./history-store.js";
 import { PricingStore } from "./pricing.js";
 import { historySchema } from "./history-schema.js";
 import {
@@ -202,13 +203,6 @@ export const rpcContract = defineRpcContract({
 
 export default async function plugin(bb: BbPluginApi) {
   const usage = new UsageCache(() => changed());
-  const history = new HistoryCache(
-    () => changed(),
-    undefined,
-    undefined,
-    undefined,
-    () => pricing.current(),
-  );
   const usageController = new AbortController();
   const fetchUsage = createUsageClient(
     fetch,
@@ -227,11 +221,6 @@ export default async function plugin(bb: BbPluginApi) {
   const fetchLocalUsage = createLocalUsageClient(fetch, usageController.signal);
   const localKeys: Partial<Record<PoolProviderId, string>> = {};
   const usageKey = (provider: SwapProviderId, name: string) => `${provider}/${name}`;
-  bb.onDispose(() => {
-    usage.dispose();
-    history.dispose();
-    usageController.abort();
-  });
   const settings = bb.settings.define({
     autoSwitch: {
       type: "boolean",
@@ -271,9 +260,27 @@ export default async function plugin(bb: BbPluginApi) {
     `CREATE TABLE IF NOT EXISTS tokens (
        provider TEXT NOT NULL, name TEXT NOT NULL, body TEXT NOT NULL, updated_at INTEGER NOT NULL,
        PRIMARY KEY (provider, name))`,
+    `CREATE TABLE IF NOT EXISTS usage_log_cache (
+       provider TEXT NOT NULL, identity TEXT NOT NULL, path TEXT NOT NULL,
+       size INTEGER NOT NULL, mtime REAL NOT NULL, schema_version INTEGER NOT NULL,
+       body TEXT NOT NULL, updated_at INTEGER NOT NULL,
+       PRIMARY KEY (provider, identity, path))`,
   ]);
   // The database holds refresh tokens; keep it owner-only like the CLIs' own files.
   await restrictToOwner(db.name);
+  const history = new HistoryCache(
+    () => changed(),
+    undefined,
+    undefined,
+    undefined,
+    () => pricing.current(),
+    sqliteHistoryStore(db),
+  );
+  bb.onDispose(() => {
+    usage.dispose();
+    history.dispose();
+    usageController.abort();
+  });
 
   const pool = pooler(bb);
 

@@ -52,8 +52,8 @@ describe("usage history", () => {
   it("keeps 30 calendar days, excludes old/future data, deduplicates copies and retains unknown costs", () => {
     const history = aggregateHistory(
       [
-        event({ id: "copy", tokens: 90 }),
         event({ id: "copy", tokens: 100 }),
+        event({ id: "copy", tokens: 90 }),
         event({ at: now - 86_400_000, costUsd: 0.67 }),
         event({ at: now - 40 * 86_400_000 }),
         event({ at: now + 1 }),
@@ -85,7 +85,7 @@ describe("usage history", () => {
       [
         ...parse(claude("message", 10)),
         ...parse(claude("message", 30)),
-        ...parse({ ...claude("error", 100), isApiErrorMessage: true }),
+        ...parse({ ...claude("error", 100), message: { usage: { input_tokens: null, output_tokens: 10 } } }),
       ],
       now,
     );

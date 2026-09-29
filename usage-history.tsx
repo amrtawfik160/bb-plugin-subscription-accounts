@@ -244,7 +244,11 @@ export function HistoryPanel({
       ) : null}
       {history.partial ? (
         <p role="status" className="text-xs text-foreground">
-          Partial records · Some usage could not be read. Totals may be lower than actual usage.
+          {history.scan?.oversizedRecords
+            ? `Skipped ${new Intl.NumberFormat().format(history.scan.oversizedRecords)} records over OpenUsage’s 1 MB limit. `
+            : "Partial records · Some usage could not be read. "}
+          {history.scan?.unreadableFiles ? `${history.scan.unreadableFiles} files could not be read. ` : ""}
+          Totals may be lower than actual usage.
         </p>
       ) : null}
       {history.error ? (
@@ -253,12 +257,16 @@ export function HistoryPanel({
           {stale ? " Showing the last successful reading." : ""}
         </p>
       ) : null}
-      {total.unpricedTokens ? (
+      {(history.unpricedTokens ?? total.unpricedTokens) ? (
         <p className="text-xs text-muted-foreground">
-          Price unavailable for {compact(total.unpricedTokens)} tokens. Cost totals include priced usage only.
+          Price unavailable for {compact(history.unpricedTokens ?? total.unpricedTokens ?? 0)} tokens. Cost
+          and token totals include priced usage only.
         </p>
       ) : null}
       <p className="text-xs text-muted-foreground">
+        {history.scan && !history.refreshing && !pending && history.status !== "error"
+          ? "Full history scan complete. "
+          : ""}
         {history.refreshing || pending
           ? "Refreshing history…"
           : history.fetchedAt

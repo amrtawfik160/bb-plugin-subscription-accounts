@@ -38,6 +38,10 @@
     "cursor-history.ts",
     "usage-history.tsx",
     "pricing.ts",
-    "pricing.test.ts"
+    "pricing.test.ts",
+    "jsonl-scanner.ts",
+    "history-discovery.ts",
+    "history-store.ts",
+    "history-scanner.test.ts"
   ]
 }

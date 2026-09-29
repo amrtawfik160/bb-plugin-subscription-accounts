@@ -4,7 +4,8 @@ The bundled pricing snapshot is derived from the public LiteLLM model pricing
 catalog, models.dev, and OpenUsage’s pricing supplement and model alias rules.
 Rates are factual API prices; see the source URLs in `pricing.ts`.
 
-OpenUsage supplement and aliases: https://github.com/robinebers/openusage
+OpenUsage supplement, aliases, history discovery, streaming reader, parsed-file cache semantics,
+Claude/Codex/Grok usage parsers and deduplication, and Cursor CSV fetching/parsing: https://github.com/robinebers/openusage
 
 MIT License
 

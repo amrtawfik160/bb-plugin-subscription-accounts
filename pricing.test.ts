@@ -228,7 +228,7 @@ describe("history estimates", () => {
         },
       },
     });
-    const first = parse(row(11000, 10000, 100));
+    const first = parse({ ...row(11000, 10000, 100), timestamp: new Date(now - 1).toISOString() });
     const second = parse(row(22000, 20000, 200));
     expect(parse(row(22000, 20000, 200))).toEqual([]);
     expect(aggregateHistory([...first, ...second], now, "local", false, pricing).models[0]).toMatchObject({
@@ -277,11 +277,11 @@ describe("history estimates", () => {
       costUsd: 0.57,
       estimated: true,
     });
+    expect(result).toMatchObject({ unpricedTokens: 510, unpricedModels: ["unknown"] });
     expect(result.days.at(-1)).toMatchObject({
-      tokens: 281510,
+      tokens: 281000,
       costUsd: 0.57,
       estimated: true,
-      unpricedTokens: 510,
     });
   });
   it("reprices unchanged cached files after prices refresh and returns only aggregates", async () => {
@@ -311,7 +311,11 @@ describe("history estimates", () => {
         }) + "\n",
       );
       await cache.refresh("claude");
-      expect(cache.get("claude").models[0].costUsd).toBeNull();
+      expect(cache.get("claude")).toMatchObject({
+        models: [],
+        unpricedTokens: 1100,
+        unpricedModels: ["test-model"],
+      });
       rates = new ModelPricing({ ...snapshot, primary: parseLiteLLM(feed) });
       await cache.refresh("claude", true);
       expect(cache.get("claude").models[0].costUsd).toBeCloseTo(0.003);

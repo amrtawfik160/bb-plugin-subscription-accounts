@@ -69,6 +69,28 @@ const ready: AccountUsage = {
 };
 
 describe("subscription usage page", () => {
+  it("shows scan completion and identifies OpenUsage's record-size warning", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const history = aggregateHistory([{ id: null, at: now, model: "test", tokens: 100, costUsd: 1 }], now);
+    history.partial = true;
+    history.scan = { files: 9, oversizedRecords: 2, unreadableFiles: 0 };
+    const slot = renderSlot(
+      app.navPanels[0],
+      { subPath: "" },
+      {
+        rpc: {
+          overview: () => ({
+            ...fixture(ready),
+            history: { codex: history, claude: emptyHistory(), grok: emptyHistory() },
+          }),
+        },
+      },
+    );
+    await slot.findByText("75% used");
+    fireEvent.click(slot.getByRole("tab", { name: "Codex" }));
+    expect(slot.getByText(/Full history scan complete/)).toBeTruthy();
+    expect(slot.getByText(/Skipped 2 records over OpenUsage’s 1 MB limit/)).toBeTruthy();
+  });
   it("labels API estimates in summaries, chart values and model costs", async () => {
     const app = await loadPluginApp(() => import("./app"));
     const history = aggregateHistory(

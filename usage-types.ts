@@ -40,6 +40,9 @@ export interface UsageHistory {
   error: string | null;
   timeZone?: string;
   pricingAsOf?: number;
+  unpricedTokens?: number;
+  unpricedModels?: string[];
+  scan?: { files: number; oversizedRecords: number; unreadableFiles: number };
 }
 
 /** Pace assumes steady use within a fixed window; it is never measured history. */
