@@ -7,6 +7,14 @@ import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
 
 import type { rpcContract } from "./server";
+import {
+  USAGE_TTL_MS,
+  quotaPace,
+  type AccountUsage,
+  type UsageMetric,
+  type UsageHistory,
+} from "./usage-types";
+import { HistoryPanel, ProviderLinks } from "./usage-history";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Icon } from "@/components/ui/icon";
@@ -23,6 +31,7 @@ interface SwapAccount {
   active: boolean;
   exhaustedUntil: number;
   lastError: string | null;
+  usage: AccountUsage;
 }
 interface SwapSection {
   id: SwapId;
@@ -67,9 +76,18 @@ interface Overview {
     routing: Record<PoolId, boolean>;
     accounts: PoolAccount[];
     error: string | null;
-    localLogin: Record<PoolId, { email: string | null; plan: string | null; inStack: boolean } | null>;
+    localLogin: Record<
+      PoolId,
+      {
+        email: string | null;
+        plan: string | null;
+        inStack: boolean;
+        usage: AccountUsage;
+      } | null
+    >;
   };
   login: Login | null;
+  history?: Record<"claude" | "codex" | "grok", UsageHistory>;
 }
 
 type Rpc = ReturnType<typeof useRpc<typeof rpcContract>>;
@@ -141,7 +159,7 @@ function useOverview() {
     },
     [refetch],
   );
-  return { rpc, data, error, run };
+  return { rpc, data, error, run, refetch };
 }
 
 // ── shared bits ───────────────────────────────────────────────────────────
@@ -249,6 +267,171 @@ function AccountList({ empty, children }: { empty: string; children: ReactNode[]
   return <ul className="divide-y divide-border rounded-lg border border-border bg-card px-4">{children}</ul>;
 }
 
+function formatAmount(value: number, unit: UsageMetric["unit"]): string {
+  if (unit === "usd")
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: "USD",
+    }).format(value);
+  if (unit === "percent") return `${Math.round(value)}%`;
+  return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(value)} ${unit}`;
+}
+
+function QuotaMeter({ row, now }: { row: UsageMetric; now: number }) {
+  const percent = row.used !== null && row.limit !== null ? (row.used / row.limit) * 100 : null;
+  const resetPassed = row.resetAt !== null && row.resetAt <= now;
+  const pace = quotaPace(row, now);
+  return (
+    <div className="min-w-0 space-y-1.5">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-xs">
+        <span className="font-medium">{row.label}</span>
+        <span className="tabular-nums">
+          {row.used !== null
+            ? row.unit === "percent"
+              ? `${formatAmount(row.used, row.unit)} used`
+              : `${formatAmount(row.used, row.unit)}${row.limit !== null ? ` / ${formatAmount(row.limit, row.unit)}` : " used"}`
+            : row.remaining !== null
+              ? `${formatAmount(row.remaining, row.unit)} left`
+              : row.limit !== null
+                ? `${formatAmount(row.limit, row.unit)} allowance`
+                : "Usage unavailable"}
+        </span>
+      </div>
+      {percent !== null ? (
+        <div
+          role="progressbar"
+          aria-label={`${row.label} usage`}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.max(0, Math.min(100, percent))}
+          aria-valuetext={`${formatAmount(row.used!, row.unit)} used${row.remaining !== null ? `, ${formatAmount(row.remaining, row.unit)} remaining` : ""}`}
+          className="relative h-2 overflow-hidden rounded-full bg-muted"
+        >
+          <div
+            className={cn(
+              "h-full rounded-full",
+              percent >= 90 ? "bg-destructive" : percent >= 70 ? "bg-warning" : "bg-success",
+            )}
+            style={{ width: `${Math.max(0, Math.min(100, percent))}%` }}
+          />
+          {pace ? (
+            <span
+              aria-hidden
+              className="absolute inset-y-0 w-0.5 bg-foreground/60"
+              style={{ left: `${pace.expected}%` }}
+              title="Expected use at a steady pace"
+            />
+          ) : null}
+        </div>
+      ) : null}
+      <div className="flex flex-wrap justify-between gap-x-3 gap-y-1 text-xs text-muted-foreground">
+        {row.used !== null && row.remaining !== null ? (
+          <span className="tabular-nums">{formatAmount(row.remaining, row.unit)} left</span>
+        ) : null}
+        {row.used !== null && row.limit === null ? <span>Quota not reported</span> : null}
+        {row.resetAt !== null ? (
+          <span title={new Date(row.resetAt).toLocaleString()}>
+            {resetPassed ? "Reset passed · refresh usage" : `Resets in ${formatWait(row.resetAt - now)}`}
+          </span>
+        ) : percent !== null ? (
+          <span>Reset time not reported</span>
+        ) : null}
+      </div>
+      {pace?.limitIn != null ? (
+        <p className="text-xs text-foreground" title="Estimate from average use since the quota window began">
+          Limit in ~{formatWait(pace.limitIn)} at this pace
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function UsageDetails({
+  usage,
+  now,
+  onRefresh,
+  name,
+  showExtraUsage = false,
+}: {
+  usage: AccountUsage;
+  now: number;
+  onRefresh: () => Promise<unknown>;
+  name: string;
+  showExtraUsage?: boolean;
+}) {
+  const [pending, setPending] = useState(false);
+  const refresh = async () => {
+    setPending(true);
+    try {
+      await onRefresh();
+    } finally {
+      setPending(false);
+    }
+  };
+  const stale =
+    usage.fetchedAt !== null && (now - usage.fetchedAt >= USAGE_TTL_MS || usage.status === "error");
+  return (
+    <div className="space-y-3 pt-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-xs text-muted-foreground">
+          {usage.refreshing || pending ? (
+            "Refreshing usage…"
+          ) : usage.fetchedAt !== null ? (
+            <span title={new Date(usage.fetchedAt).toLocaleString()}>
+              {stale ? "Last known usage" : "Updated"} ·{" "}
+              {now - usage.fetchedAt < 60_000 ? "just now" : `${formatWait(now - usage.fetchedAt)} ago`}
+            </span>
+          ) : (
+            "Subscription usage"
+          )}
+        </span>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="min-h-11 px-2 text-xs sm:min-h-8"
+          disabled={pending || usage.refreshing}
+          onClick={() => void refresh()}
+          aria-label={`Refresh usage for ${name}`}
+        >
+          <Icon name="RefreshCw" className="size-3.5" />
+          Refresh
+        </Button>
+      </div>
+      {usage.metrics.length > 0 ? (
+        <div className="grid grid-cols-1 gap-x-6 gap-y-4 sm:grid-cols-2">
+          {usage.metrics.map((row) => (
+            <QuotaMeter key={row.label} row={row} now={now} />
+          ))}
+        </div>
+      ) : (
+        <p role="status" className="text-xs text-muted-foreground">
+          {usage.status === "loading"
+            ? "Fetching subscription usage…"
+            : usage.status === "unavailable"
+              ? "The provider did not report usage for this account. Refresh to check again."
+              : "Usage could not be loaded. Refresh to retry."}
+        </p>
+      )}
+      {showExtraUsage &&
+      usage.status === "ready" &&
+      !usage.metrics.some((row) => row.label === "Extra usage") ? (
+        <p className="text-xs text-muted-foreground">
+          <span className="font-medium">Extra usage</span> · Not reported
+        </p>
+      ) : null}
+      {usage.error ? (
+        <p role="status" className="break-words text-xs text-destructive">
+          {usage.error}
+          {usage.metrics.length > 0 ? " Showing the last successful reading." : ""}
+        </p>
+      ) : null}
+      {usage.history ? (
+        <HistoryPanel history={usage.history} name={name} now={now} onRefresh={onRefresh} />
+      ) : null}
+    </div>
+  );
+}
+
 // ── sign-in ───────────────────────────────────────────────────────────────
 
 function SignIn({
@@ -319,7 +502,9 @@ function SignIn({
         </Button>
       </div>
 
-      {status === "starting" ? <p className="text-sm text-muted-foreground">Getting a sign-in link…</p> : null}
+      {status === "starting" ? (
+        <p className="text-sm text-muted-foreground">Getting a sign-in link…</p>
+      ) : null}
 
       {status === "failed" ? (
         <div className="flex flex-wrap items-center gap-3">
@@ -334,8 +519,8 @@ function SignIn({
         <ol className="space-y-4 text-sm">
           <li className="space-y-2">
             <p>
-              <span className="font-medium">1.</span> Open the sign-in page and sign in with the account you want to
-              add.
+              <span className="font-medium">1.</span> Open the sign-in page and sign in with the account you
+              want to add.
             </p>
             <div className="flex flex-wrap items-center gap-3">
               <Button asChild size="sm" variant="outline">
@@ -416,7 +601,7 @@ function SwapTab({ section, data, rpc, run }: { section: SwapSection; data: Over
           "No saved account is active. "
         )}
         <span className="text-muted-foreground">
-          {section.accounts.length} saved · {ready} with quota left
+          {section.accounts.length} saved · {ready} without a cooldown
         </span>
       </p>
 
@@ -427,7 +612,8 @@ function SwapTab({ section, data, rpc, run }: { section: SwapSection; data: Over
       {section.live.signedIn && !section.live.saved ? (
         <Notice>
           <span className="flex-1">
-            {section.label} is signed in{section.live.email ? (
+            {section.label} is signed in
+            {section.live.email ? (
               <>
                 {" "}
                 as <span className="font-medium">{section.live.email}</span>
@@ -437,7 +623,9 @@ function SwapTab({ section, data, rpc, run }: { section: SwapSection; data: Over
           </span>
           <Button
             size="sm"
-            onClick={() => run(() => rpc.call("saveCurrent", { provider: section.id }), "Saved the current login")}
+            onClick={() =>
+              run(() => rpc.call("saveCurrent", { provider: section.id }), "Saved the current login")
+            }
           >
             Save it
           </Button>
@@ -450,59 +638,96 @@ function SwapTab({ section, data, rpc, run }: { section: SwapSection; data: Over
           {section.accounts.map((account, index) => {
             const out = account.exhaustedUntil > now;
             return (
-              <li key={account.name} className="flex flex-wrap items-center gap-x-4 gap-y-2 py-3">
-                <OrderArrows
-                  name={account.name}
-                  index={index}
-                  count={section.accounts.length}
-                  onMove={(direction) => run(() => rpc.call("move", { ...target(account.name), direction }))}
-                />
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-baseline gap-x-2">
-                    <span className="font-medium">{account.name}</span>
-                    {account.email ? (
-                      <span className="truncate text-sm text-muted-foreground">{account.email}</span>
-                    ) : null}
-                  </div>
-                  <span
-                    className={cn(
-                      "inline-flex items-center gap-1.5 text-xs",
-                      out ? "text-destructive" : account.active ? "text-foreground" : "text-muted-foreground",
-                    )}
-                  >
-                    <Dot tone={out ? "bad" : account.active ? "good" : "idle"} />
-                    {account.active ? (out ? "In use · out of quota" : "In use") : null}
-                    {!account.active && out ? `Out of quota · back in ${formatWait(account.exhaustedUntil - now)}` : null}
-                    {!account.active && !out ? "Ready" : null}
-                  </span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  {out ? (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => run(() => rpc.call("reset", target(account.name)), `${account.name} marked ready`)}
-                    >
-                      <Icon name="RotateCcw" className="size-3.5" />
-                      Mark ready
-                    </Button>
-                  ) : account.active ? (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => run(() => rpc.call("markUsed", target(account.name)), "Moved to the next account")}
-                    >
-                      Skip to next
-                    </Button>
-                  ) : null}
-                  {!account.active ? (
-                    <Button size="sm" onClick={() => run(() => rpc.call("use", target(account.name)), `Now using ${account.name}`)}>
-                      Use now
-                    </Button>
-                  ) : null}
-                  <RemoveButton
+              <li key={account.name} className="space-y-2 py-4">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                  <OrderArrows
                     name={account.name}
-                    onRemove={() => run(() => rpc.call("remove", target(account.name)), `Removed ${account.name}`)}
+                    index={index}
+                    count={section.accounts.length}
+                    onMove={(direction) =>
+                      run(() =>
+                        rpc.call("move", {
+                          ...target(account.name),
+                          direction,
+                        }),
+                      )
+                    }
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-baseline gap-x-2">
+                      <span className="font-medium">{account.name}</span>
+                      {account.usage.plan ? (
+                        <span className="text-xs text-muted-foreground">{account.usage.plan}</span>
+                      ) : null}
+                      {account.email ? (
+                        <span className="truncate text-sm text-muted-foreground">{account.email}</span>
+                      ) : null}
+                    </div>
+                    <span
+                      className={cn(
+                        "inline-flex items-center gap-1.5 text-xs",
+                        out
+                          ? "text-destructive"
+                          : account.active
+                            ? "text-foreground"
+                            : "text-muted-foreground",
+                      )}
+                    >
+                      <Dot tone={out ? "bad" : account.active ? "good" : "idle"} />
+                      {account.active ? (out ? "In use · out of quota" : "In use") : null}
+                      {!account.active && out
+                        ? `Out of quota · back in ${formatWait(account.exhaustedUntil - now)}`
+                        : null}
+                      {!account.active && !out ? "Ready" : null}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    {out ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() =>
+                          run(() => rpc.call("reset", target(account.name)), `${account.name} marked ready`)
+                        }
+                      >
+                        <Icon name="RotateCcw" className="size-3.5" />
+                        Mark ready
+                      </Button>
+                    ) : account.active ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() =>
+                          run(() => rpc.call("markUsed", target(account.name)), "Moved to the next account")
+                        }
+                      >
+                        Skip to next
+                      </Button>
+                    ) : null}
+                    {!account.active ? (
+                      <Button
+                        size="sm"
+                        onClick={() =>
+                          run(() => rpc.call("use", target(account.name)), `Now using ${account.name}`)
+                        }
+                      >
+                        Use now
+                      </Button>
+                    ) : null}
+                    <RemoveButton
+                      name={account.name}
+                      onRemove={() =>
+                        run(() => rpc.call("remove", target(account.name)), `Removed ${account.name}`)
+                      }
+                    />
+                  </div>
+                </div>
+                <div className="sm:pl-8">
+                  <UsageDetails
+                    usage={account.usage}
+                    now={now}
+                    name={account.name}
+                    onRefresh={() => run(() => rpc.call("usageRefresh", target(account.name)))}
                   />
                 </div>
               </li>
@@ -525,22 +750,42 @@ function SwapTab({ section, data, rpc, run }: { section: SwapSection; data: Over
 
 // ── Claude / Codex through the Account Pooler ─────────────────────────────
 
-function Usage({ label, value, resetAt, now }: { label: string; value: number | null; resetAt: number | null; now: number }) {
-  if (value === null) return null;
-  // The pooler reports utilization as a 0–1 fraction.
-  const pct = Math.round(value * 100);
+function PoolUsage({ account, now }: { account: PoolAccount; now: number }) {
+  const windows = [
+    {
+      label: "5-hour window",
+      value: account.fiveHourUtilization,
+      resetAt: account.fiveHourResetAt,
+    },
+    {
+      label: "Weekly window",
+      value: account.sevenDayUtilization,
+      resetAt: account.sevenDayResetAt,
+    },
+  ];
   return (
-    <div className="flex min-w-36 flex-1 items-center gap-2 text-xs text-muted-foreground">
-      <span className="w-6 shrink-0">{label}</span>
-      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted" aria-label={`${label} usage ${pct}%`}>
-        <div
-          className={cn("h-full rounded-full", pct >= 90 ? "bg-destructive" : pct >= 70 ? "bg-warning" : "bg-success")}
-          style={{ width: `${Math.min(100, pct)}%` }}
-        />
-      </div>
-      <span className="w-20 shrink-0 text-right tabular-nums">
-        {pct}%{resetAt && resetAt > now ? ` · ${formatWait(resetAt - now)}` : ""}
-      </span>
+    <div className="grid grid-cols-1 gap-x-6 gap-y-4 pt-2 sm:grid-cols-2">
+      {windows.map(({ label, value, resetAt }) =>
+        value === null ? (
+          <p key={label} className="text-xs text-muted-foreground">
+            {label}: usage not reported. Refresh to check.
+          </p>
+        ) : (
+          <QuotaMeter
+            key={label}
+            now={now}
+            row={{
+              label,
+              used: Math.max(0, value * 100),
+              limit: 100,
+              remaining: Math.max(0, 100 - value * 100),
+              unit: "percent",
+              resetAt,
+              windowMs: (label === "5-hour window" ? 5 : 168) * 3_600_000,
+            }}
+          />
+        ),
+      )}
     </div>
   );
 }
@@ -554,7 +799,19 @@ const POOL_STATUS: Record<PoolAccount["status"], { text: string; tone: "good" | 
 };
 
 /** The subscription this machine's CLI is signed into, with a one-click add. */
-function MachineLogin({ provider, label, data, rpc, run }: { provider: PoolId; label: string; data: Overview; rpc: Rpc; run: Run }) {
+function MachineLogin({
+  provider,
+  label,
+  data,
+  rpc,
+  run,
+}: {
+  provider: PoolId;
+  label: string;
+  data: Overview;
+  rpc: Rpc;
+  run: Run;
+}) {
   const local = data.pool.localLogin[provider];
   if (!local) {
     return (
@@ -566,29 +823,40 @@ function MachineLogin({ provider, label, data, rpc, run }: { provider: PoolId; l
     );
   }
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-border bg-card px-4 py-3 text-sm">
-      <div className="min-w-0 flex-1">
-        <p className="text-xs text-muted-foreground">Signed in on this machine</p>
-        <p className="flex flex-wrap items-baseline gap-x-2">
-          <span className="font-medium">{local.email ?? `${label} account`}</span>
-          {local.plan ? (
-            <span className="rounded bg-muted px-1.5 py-0.5 text-xs font-medium">{local.plan}</span>
-          ) : null}
-        </p>
+    <div className="space-y-2 rounded-lg border border-border bg-card px-4 py-3 text-sm">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <div className="min-w-0 flex-1">
+          <p className="text-xs text-muted-foreground">Signed in on this machine</p>
+          <p className="flex flex-wrap items-baseline gap-x-2">
+            <span className="font-medium">{local.email ?? `${label} account`}</span>
+            {local.plan ? (
+              <span className="rounded bg-muted px-1.5 py-0.5 text-xs font-medium">{local.plan}</span>
+            ) : null}
+          </p>
+        </div>
+        {local.inStack ? (
+          <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Icon name="Check" className="size-3.5" />
+            In your stack
+          </span>
+        ) : (
+          <Button
+            size="sm"
+            onClick={() =>
+              run(() => rpc.call("poolImport", { provider }), `Added ${local.email ?? label} to the stack`)
+            }
+          >
+            Add to stack
+          </Button>
+        )}
       </div>
-      {local.inStack ? (
-        <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-          <Icon name="Check" className="size-3.5" />
-          In your stack
-        </span>
-      ) : (
-        <Button
-          size="sm"
-          onClick={() => run(() => rpc.call("poolImport", { provider }), `Added ${local.email ?? label} to the stack`)}
-        >
-          Add to stack
-        </Button>
-      )}
+      <UsageDetails
+        usage={local.usage}
+        now={data.now}
+        name={`machine ${label} login`}
+        showExtraUsage={provider === "claude"}
+        onRefresh={() => run(() => rpc.call("localUsageRefresh", { provider }))}
+      />
     </div>
   );
 }
@@ -599,7 +867,11 @@ function PoolTab({ provider, data, rpc, run }: { provider: PoolId; data: Overvie
   const accounts = pool.accounts.filter((a) => a.provider === provider);
 
   if (!pool.installed) {
-    return <Notice tone="warn">This bb does not include the Account Pooler plugin, which {label} accounts need.</Notice>;
+    return (
+      <Notice tone="warn">
+        This bb does not include the Account Pooler plugin, which {label} accounts need.
+      </Notice>
+    );
   }
   if (!pool.enabled) {
     return (
@@ -608,8 +880,8 @@ function PoolTab({ provider, data, rpc, run }: { provider: PoolId; data: Overvie
         <div className="space-y-3 rounded-lg border border-border bg-card p-4 text-sm">
           <p className="font-medium">{label} accounts run through bb's Account Pooler</p>
           <p className="text-muted-foreground">
-            The pooler sends {label} traffic to whichever saved account still has quota, so a long task keeps going when
-            one plan runs out. Turning it on changes nothing until you add an account.
+            The pooler sends {label} traffic to whichever saved account still has quota, so a long task keeps
+            going when one plan runs out. Turning it on changes nothing until you add an account.
           </p>
           <Button onClick={() => run(() => rpc.call("poolEnable"), "Account Pooler is on")}>Turn on</Button>
         </div>
@@ -651,13 +923,23 @@ function PoolTab({ provider, data, rpc, run }: { provider: PoolId; data: Overvie
                     name={account.label}
                     index={index}
                     count={accounts.length}
-                    onMove={(direction) => run(() => rpc.call("poolMove", { provider, id: account.id, direction }))}
+                    onMove={(direction) =>
+                      run(() =>
+                        rpc.call("poolMove", {
+                          provider,
+                          id: account.id,
+                          direction,
+                        }),
+                      )
+                    }
                   />
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-baseline gap-x-2">
                       <span className="font-medium">{account.email ?? account.label}</span>
                       {account.subscriptionType ? (
-                        <span className="text-xs uppercase text-muted-foreground">{account.subscriptionType}</span>
+                        <span className="text-xs uppercase text-muted-foreground">
+                          {account.subscriptionType}
+                        </span>
                       ) : null}
                     </div>
                     <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -683,7 +965,11 @@ function PoolTab({ provider, data, rpc, run }: { provider: PoolId; data: Overvie
                       variant="outline"
                       onClick={() =>
                         run(
-                          () => rpc.call("poolToggle", { id: account.id, enabled: !account.enabled }),
+                          () =>
+                            rpc.call("poolToggle", {
+                              id: account.id,
+                              enabled: !account.enabled,
+                            }),
                           account.enabled ? "Account turned off" : "Account turned on",
                         )
                       }
@@ -696,9 +982,8 @@ function PoolTab({ provider, data, rpc, run }: { provider: PoolId; data: Overvie
                     />
                   </div>
                 </div>
-                <div className="flex flex-wrap gap-x-6 gap-y-1 pl-8">
-                  <Usage label="5h" value={account.fiveHourUtilization} resetAt={account.fiveHourResetAt} now={data.now} />
-                  <Usage label="7d" value={account.sevenDayUtilization} resetAt={account.sevenDayResetAt} now={data.now} />
+                <div className="sm:pl-8">
+                  <PoolUsage account={account} now={data.now} />
                 </div>
               </li>
             );
@@ -717,24 +1002,35 @@ function tabSummary(id: TabId, data: Overview): { count: number; tone: "good" | 
   if (id === "claude" || id === "codex") {
     const accounts = data.pool.accounts.filter((a) => a.provider === id);
     const ready = accounts.filter((a) => a.status === "ready").length;
-    return { count: accounts.length, tone: accounts.length === 0 ? "idle" : ready > 0 ? "good" : "bad" };
+    return {
+      count: accounts.length,
+      tone: accounts.length === 0 ? "idle" : ready > 0 ? "good" : "bad",
+    };
   }
   const section = data.swap.find((s) => s.id === id);
   const accounts = section?.accounts ?? [];
   const ready = accounts.filter((a) => a.exhaustedUntil <= data.now).length;
-  return { count: accounts.length, tone: accounts.length === 0 ? "idle" : ready > 0 ? "good" : "bad" };
+  return {
+    count: accounts.length,
+    tone: accounts.length === 0 ? "idle" : ready > 0 ? "good" : "bad",
+  };
 }
 
 function AccountsPage() {
-  const { rpc, data, error, run } = useOverview();
+  const { rpc, data, error, run, refetch } = useOverview();
   const [tab, setTab] = useState<TabId>("antigravity");
 
   if (!data) {
     return (
       <Frame>
         <p role="status" className="text-sm text-muted-foreground">
-          {error ?? "Loading accounts…"}
+          {error ?? "Loading accounts and subscription usage…"}
         </p>
+        {error ? (
+          <Button variant="outline" onClick={refetch}>
+            Retry loading accounts
+          </Button>
+        ) : null}
       </Frame>
     );
   }
@@ -743,6 +1039,22 @@ function AccountsPage() {
 
   return (
     <Frame>
+      <div>
+        <h1 className="text-lg font-semibold">Subscription accounts</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Check usage and remaining quota before switching accounts. Usage updates every five minutes.
+        </p>
+      </div>
+      {error ? (
+        <Notice tone="warn">
+          <span className="flex-1">
+            Could not update accounts: {error}. Showing the last loaded accounts.
+          </span>
+          <Button size="sm" variant="outline" onClick={refetch}>
+            Retry
+          </Button>
+        </Notice>
+      ) : null}
       <div role="tablist" aria-label="Subscriptions" className="flex flex-wrap gap-1 border-b border-border">
         {TABS.map(({ id, label }) => {
           const summary = tabSummary(id, data);
@@ -752,10 +1064,26 @@ function AccountsPage() {
               key={id}
               type="button"
               role="tab"
+              id={`subscription-tab-${id}`}
               aria-selected={selected}
+              aria-controls="subscription-panel"
+              tabIndex={selected ? 0 : -1}
               onClick={() => setTab(id)}
+              onKeyDown={(event) => {
+                const offset = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+                if (!offset && event.key !== "Home" && event.key !== "End") return;
+                event.preventDefault();
+                const next =
+                  event.key === "Home"
+                    ? TABS[0]
+                    : event.key === "End"
+                      ? TABS[TABS.length - 1]
+                      : TABS[(TABS.findIndex((item) => item.id === id) + offset + TABS.length) % TABS.length];
+                setTab(next.id);
+                document.getElementById(`subscription-tab-${next.id}`)?.focus();
+              }}
               className={cn(
-                "-mb-px flex items-center gap-2 border-b-2 px-3 py-2 text-sm",
+                "-mb-px flex min-h-11 items-center gap-2 border-b-2 px-3 py-2 text-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
                 selected
                   ? "border-foreground font-medium text-foreground"
                   : "border-transparent text-muted-foreground hover:text-foreground",
@@ -763,33 +1091,59 @@ function AccountsPage() {
             >
               {summary.count > 0 ? <Dot tone={summary.tone} /> : null}
               {label}
-              {summary.count > 0 ? <span className="text-xs text-muted-foreground">{summary.count}</span> : null}
+              {summary.count > 0 ? (
+                <span className="text-xs text-muted-foreground">{summary.count}</span>
+              ) : null}
             </button>
           );
         })}
       </div>
 
-      {swapSection ? (
-        <>
-          <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-card px-4 py-3">
-            <Checkbox
-              className="mt-0.5"
-              checked={data.autoSwitch}
-              onCheckedChange={(checked) => run(() => rpc.call("setAutoSwitch", { enabled: checked === true }))}
-            />
-            <span className="space-y-0.5">
-              <span className="block text-sm font-medium">Switch automatically when quota runs out</span>
-              <span className="block text-xs text-muted-foreground">
-                When a thread hits the limit, bb moves to the next account in the list and retries the turn. If every
-                account is used up, it waits for the first one to reset. Applies to Antigravity, Cursor and Grok.
+      <div id="subscription-panel" role="tabpanel" aria-labelledby={`subscription-tab-${tab}`}>
+        {swapSection ? (
+          <>
+            <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-card px-4 py-3">
+              <Checkbox
+                className="mt-0.5"
+                checked={data.autoSwitch}
+                onCheckedChange={(checked) =>
+                  run(() => rpc.call("setAutoSwitch", { enabled: checked === true }))
+                }
+              />
+              <span className="space-y-0.5">
+                <span className="block text-sm font-medium">Switch automatically when quota runs out</span>
+                <span className="block text-xs text-muted-foreground">
+                  When a thread hits the limit, bb moves to the next account in the list and retries the turn.
+                  If every account is used up, it waits for the first one to reset. Applies to Antigravity,
+                  Cursor and Grok.
+                </span>
               </span>
-            </span>
-          </label>
-          <SwapTab section={swapSection} data={data} rpc={rpc} run={run} />
-        </>
-      ) : (
-        <PoolTab provider={tab as PoolId} data={data} rpc={rpc} run={run} />
-      )}
+            </label>
+            <div className="mt-5">
+              <SwapTab section={swapSection} data={data} rpc={rpc} run={run} />
+            </div>
+          </>
+        ) : (
+          <PoolTab provider={tab as PoolId} data={data} rpc={rpc} run={run} />
+        )}
+        <div className="mt-5 space-y-3">
+          {tab !== "cursor" && tab !== "antigravity" && data.history?.[tab] ? (
+            <HistoryPanel
+              key={tab}
+              history={data.history[tab]}
+              now={data.now}
+              name={TABS.find((item) => item.id === tab)!.label}
+              onRefresh={() => run(() => rpc.call("historyRefresh", { provider: tab }))}
+            />
+          ) : null}
+          {tab === "antigravity" ? (
+            <p className="text-xs text-muted-foreground">
+              Usage trend unavailable · Antigravity’s quota API does not provide daily token history.
+            </p>
+          ) : null}
+          <ProviderLinks provider={tab} />
+        </div>
+      </div>
     </Frame>
   );
 }
@@ -797,7 +1151,9 @@ function AccountsPage() {
 function Frame({ children }: { children: ReactNode }) {
   return (
     <div className="h-full min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto box-border w-full max-w-3xl space-y-5 px-4 pb-6 pt-3 md:px-5 md:pt-4">{children}</div>
+      <div className="mx-auto box-border w-full max-w-3xl space-y-5 px-4 pb-6 pt-3 md:px-5 md:pt-4">
+        {children}
+      </div>
     </div>
   );
 }

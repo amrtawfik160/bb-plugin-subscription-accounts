@@ -11,6 +11,15 @@ bb moves to the next one and carries on with the task.
 - **One page for every subscription.** Adds a **Subscription Accounts** page
   to the bb sidebar, with a tab per provider. Each tab shows which account is
   in use, which ones are out of quota, and when they come back.
+- **Usage and quota beside each account.** Shows used and remaining allowance,
+  reset countdowns, plan names and credit balances when the provider reports
+  them. Refresh an account manually or let its usage update every five minutes.
+  Failed requests keep the last successful reading, labeled as last known usage.
+- **Usage history.** Daily token trends with 7/30-day views, Today/Yesterday/30-day
+  totals, and model breakdowns. Claude, Codex and Grok history comes from this
+  machine's CLI records across all logins; Cursor uses each account's usage export.
+  Costs appear only when recorded. Antigravity's quota API has no daily history.
+  Known quota windows also show a steady-pace marker and estimated time to the limit.
 - **Switches accounts automatically.** When a thread hits a plan limit, the
   plugin marks that account as used up until its reset time, switches to the
   next account in your list, and retries the turn. You don't have to do
@@ -91,6 +100,34 @@ Under **Settings → Plugins → Subscription Accounts**, or with
 |---|---|---|
 | `autoSwitch` | `true` | Switch and retry automatically on quota errors (Antigravity, Cursor, Grok) |
 | `fallbackCooldownMinutes` | `60` | How long an account counts as used up when the error has no reset time |
+| `antigravityOAuthClientId` / `antigravityOAuthClientSecret` | Unset | Protected OAuth client settings for refreshing Antigravity usage access; otherwise refresh the CLI login |
+
+## Usage data
+
+Antigravity shows shared Gemini and Claude pool quotas, with weekly windows
+when its API supports them. Cursor shows billing-cycle usage, model allowances,
+on-demand spend and credit grants; request-based plans use the dashboard
+fallback. Grok shows its unified weekly pool and any pay-as-you-go cap. Claude
+and Codex keep their pooler usage displays, and the machine's current login
+also shows usage without requiring an import into the pooler.
+
+The adapters were researched from [OpenUsage](https://github.com/robinebers/openusage).
+They call each provider directly from the bb server using that account's saved
+login. Usage responses are normalized before reaching the page; tokens are
+never included. Swap-provider token refreshes are saved without replacing a
+newer CLI login. Local Claude/Codex usage reads existing access tokens; run the
+CLI to refresh an expired login, or use the pooler's managed accounts.
+
+Usage is a five-minute in-memory cache, separate from switching cooldowns.
+A cooldown-free account is not proof of remaining quota. Missing metrics and
+failed requests are labeled explicitly; a reset countdown passing does not
+silently turn an old reading into a fresh allowance.
+
+The UI keeps BB's host fonts, theme colors and account order so usage stays
+beside the account it describes. Meters communicate consumed allowance, with
+text for remaining quota and reset times; warning colors signal approaching
+limits. The metric grid becomes a single column on narrow screens. Its design
+uses ENERGY 1 / RHYTHM 1 / MOTION 1, matching the existing accounts page.
 
 ## Security
 
@@ -136,6 +173,8 @@ bb plugin install . --yes     # or: bb plugin reload subscription-accounts
 | `pooler.ts` | Calls bb's Account Pooler for Claude and Codex |
 | `server.ts` | Storage, automatic switching, page RPC, `bb subs` CLI |
 | `app.tsx` | The Subscription Accounts page |
+| `usage.ts` | Normalized quota metrics, provider mappers and five-minute cache |
+| `usage-client.ts` | Server-only provider requests and token refresh |
 
 ## License
 

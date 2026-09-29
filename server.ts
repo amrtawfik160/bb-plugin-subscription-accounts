@@ -8,6 +8,7 @@
 // which routes their traffic by quota without swapping files.
 
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -31,6 +32,10 @@ import {
   validateName,
 } from "./pool.js";
 import { type PoolAccount, pooler } from "./pooler.js";
+import { UsageCache, usageSchema, UsageError } from "./usage.js";
+import { createLocalUsageClient, createUsageClient } from "./usage-client.js";
+import { HistoryCache } from "./history.js";
+import { historySchema } from "./history-schema.js";
 import {
   type PoolProviderId,
   SWAP_IDS,
@@ -64,6 +69,7 @@ const swapAccountSchema = z.object({
   lastError: z.string().nullable(),
   lastActivatedAt: z.number().nullable(),
   addedAt: z.number(),
+  usage: usageSchema,
 });
 
 const loginSchema = z.object({
@@ -98,6 +104,7 @@ const localLoginSchema = z.object({
   email: z.string().nullable(),
   plan: z.string().nullable(),
   inStack: z.boolean(),
+  usage: usageSchema,
 });
 
 const overviewSchema = z.object({
@@ -110,7 +117,11 @@ const overviewSchema = z.object({
       installed: z.boolean(),
       active: z.string().nullable(),
       accounts: z.array(swapAccountSchema),
-      live: z.object({ email: z.string().nullable(), saved: z.boolean(), signedIn: z.boolean() }),
+      live: z.object({
+        email: z.string().nullable(),
+        saved: z.boolean(),
+        signedIn: z.boolean(),
+      }),
     }),
   ),
   pool: z.object({
@@ -120,9 +131,13 @@ const overviewSchema = z.object({
     accounts: z.array(poolAccountSchema),
     error: z.string().nullable(),
     /** The subscription this machine's Claude Code / Codex CLI is signed into. */
-    localLogin: z.object({ claude: localLoginSchema.nullable(), codex: localLoginSchema.nullable() }),
+    localLogin: z.object({
+      claude: localLoginSchema.nullable(),
+      codex: localLoginSchema.nullable(),
+    }),
   }),
   login: loginSchema.nullable(),
+  history: z.object({ claude: historySchema, codex: historySchema, grok: historySchema }),
 });
 
 const swapTarget = z.object({ provider: swapIdSchema, name: z.string() });
@@ -135,24 +150,66 @@ export const rpcContract = defineRpcContract({
   markUsed: { input: swapTarget, output: ok },
   reset: { input: swapTarget, output: ok },
   remove: { input: swapTarget, output: ok },
-  move: { input: swapTarget.extend({ direction: z.enum(["up", "down"]) }), output: ok },
-  saveCurrent: { input: z.object({ provider: swapIdSchema }), output: z.object({ name: z.string() }) },
-  loginStart: { input: z.object({ provider: anyProviderSchema }), output: loginSchema },
+  move: {
+    input: swapTarget.extend({ direction: z.enum(["up", "down"]) }),
+    output: ok,
+  },
+  saveCurrent: {
+    input: z.object({ provider: swapIdSchema }),
+    output: z.object({ name: z.string() }),
+  },
+  loginStart: {
+    input: z.object({ provider: anyProviderSchema }),
+    output: loginSchema,
+  },
   loginSubmit: { input: z.object({ code: z.string() }), output: loginSchema },
   loginCancel: { input: z.null(), output: ok },
   poolEnable: { input: z.null(), output: ok },
   poolImport: { input: z.object({ provider: poolIdSchema }), output: ok },
   poolRemove: { input: z.object({ id: z.string() }), output: ok },
-  poolToggle: { input: z.object({ id: z.string(), enabled: z.boolean() }), output: ok },
-  poolMove: {
-    input: z.object({ provider: poolIdSchema, id: z.string(), direction: z.enum(["up", "down"]) }),
+  poolToggle: {
+    input: z.object({ id: z.string(), enabled: z.boolean() }),
     output: ok,
   },
-  poolRouting: { input: z.object({ provider: poolIdSchema, enabled: z.boolean() }), output: ok },
+  poolMove: {
+    input: z.object({
+      provider: poolIdSchema,
+      id: z.string(),
+      direction: z.enum(["up", "down"]),
+    }),
+    output: ok,
+  },
+  poolRouting: {
+    input: z.object({ provider: poolIdSchema, enabled: z.boolean() }),
+    output: ok,
+  },
   poolRefresh: { input: z.object({ id: z.string() }), output: ok },
+  usageRefresh: { input: swapTarget, output: ok },
+  historyRefresh: { input: z.object({ provider: z.enum(["claude", "codex", "grok"]) }), output: ok },
+  localUsageRefresh: {
+    input: z.object({ provider: poolIdSchema }),
+    output: ok,
+  },
 });
 
 export default async function plugin(bb: BbPluginApi) {
+  const usage = new UsageCache(() => changed());
+  const history = new HistoryCache(() => changed());
+  const usageController = new AbortController();
+  const fetchUsage = createUsageClient(fetch, usageController.signal, async () => {
+    const values = await settings.get();
+    return values.antigravityOAuthClientId && values.antigravityOAuthClientSecret
+      ? { clientId: values.antigravityOAuthClientId, clientSecret: values.antigravityOAuthClientSecret }
+      : null;
+  });
+  const fetchLocalUsage = createLocalUsageClient(fetch, usageController.signal);
+  const localKeys: Partial<Record<PoolProviderId, string>> = {};
+  const usageKey = (provider: SwapProviderId, name: string) => `${provider}/${name}`;
+  bb.onDispose(() => {
+    usage.dispose();
+    history.dispose();
+    usageController.abort();
+  });
   const settings = bb.settings.define({
     autoSwitch: {
       type: "boolean",
@@ -166,6 +223,18 @@ export default async function plugin(bb: BbPluginApi) {
       type: "string",
       label: "Cooldown when no reset time is given (minutes)",
       default: "60",
+    },
+    antigravityOAuthClientId: {
+      type: "string",
+      label: "Antigravity OAuth client ID",
+      secret: true,
+      description: "The CLI's OAuth client. Required for refreshing expired Antigravity usage access.",
+    },
+    antigravityOAuthClientSecret: {
+      type: "string",
+      label: "Antigravity OAuth client secret",
+      secret: true,
+      description: "Stored outside the database and never sent to the page.",
     },
   });
   settings.onChange(() => changed());
@@ -234,8 +303,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   function readToken(provider: SwapProviderId, name: string): string | null {
     const row = db.prepare("SELECT body FROM tokens WHERE provider = ? AND name = ?").get(provider, name) as
-      | { body: string }
-      | undefined;
+      { body: string } | undefined;
     return row?.body ?? null;
   }
 
@@ -336,6 +404,7 @@ export default async function plugin(bb: BbPluginApi) {
         throw new Error(`"${name}" already exists. Pass --force to replace its login.`);
       }
       writeToken(provider.id, name, body);
+      usage.remove(usageKey(provider.id, name));
       const meta: AccountMeta = state.accounts[name] ?? {
         name,
         email,
@@ -345,7 +414,12 @@ export default async function plugin(bb: BbPluginApi) {
         lastError: null,
         lastActivatedAt: null,
       };
-      Object.assign(meta, { email: email ?? meta.email, key: identity.key, exhaustedUntil: 0, lastError: null });
+      Object.assign(meta, {
+        email: email ?? meta.email,
+        key: identity.key,
+        exhaustedUntil: 0,
+        lastError: null,
+      });
       state.accounts[name] = meta;
       if (!state.order.includes(name)) state.order.push(name);
       if (!state.active && options.makeActive) state.active = name;
@@ -393,6 +467,7 @@ export default async function plugin(bb: BbPluginApi) {
       delete state.accounts[meta.name];
       state.order = state.order.filter((n) => n !== meta.name);
       deleteToken(provider.id, meta.name);
+      usage.remove(usageKey(provider.id, meta.name));
       if (state.active === meta.name) state.active = null;
     });
 
@@ -424,7 +499,12 @@ export default async function plugin(bb: BbPluginApi) {
     sendAt?: number,
   ): Promise<void> {
     await bb.sdk.threads.stop({ threadId }).catch(() => undefined);
-    await bb.sdk.threads.retry({ threadId, turnRequestId: requestId, reason, ...(sendAt ? { sendAt } : {}) });
+    await bb.sdk.threads.retry({
+      threadId,
+      turnRequestId: requestId,
+      reason,
+      ...(sendAt ? { sendAt } : {}),
+    });
   }
 
   async function handleFailure(event: { threadId: string; requestId: string; attemptNumber: number }) {
@@ -578,7 +658,10 @@ export default async function plugin(bb: BbPluginApi) {
           }
         },
         async (tokenFile, sessionHome) =>
-          addAccount(spec, undefined, await fs.readFile(tokenFile, "utf8"), { makeActive: true, home: sessionHome }),
+          addAccount(spec, undefined, await fs.readFile(tokenFile, "utf8"), {
+            makeActive: true,
+            home: sessionHome,
+          }),
       );
       swapLogin = session;
       login = { ...session.state };
@@ -611,7 +694,10 @@ export default async function plugin(bb: BbPluginApi) {
         const result = await pool.codexLoginPoll(started.sessionId);
         if (result.status === "complete") {
           codexPoll = null;
-          updateLogin({ status: "done", account: result.account.email ?? result.account.label });
+          updateLogin({
+            status: "done",
+            account: result.account.email ?? result.account.label,
+          });
           return;
         }
         if (result.status === "error") {
@@ -626,7 +712,10 @@ export default async function plugin(bb: BbPluginApi) {
       }
       codexPoll.timer = setTimeout(poll, started.intervalMs);
     };
-    codexPoll = { sessionId: started.sessionId, timer: setTimeout(poll, started.intervalMs) };
+    codexPoll = {
+      sessionId: started.sessionId,
+      timer: setTimeout(poll, started.intervalMs),
+    };
     return state;
   }
 
@@ -638,7 +727,10 @@ export default async function plugin(bb: BbPluginApi) {
       try {
         const account = await pool.claudeLoginComplete(claudeSessionId, code.trim());
         claudeSessionId = null;
-        updateLogin({ status: "done", account: account.email ?? account.label });
+        updateLogin({
+          status: "done",
+          account: account.email ?? account.label,
+        });
       } catch (error) {
         updateLogin({ status: "failed", error: (error as Error).message });
       }
@@ -657,6 +749,38 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   // ── page RPC ─────────────────────────────────────────────────────────────
+
+  function refreshUsage(provider: SwapProviderId, name: string, force = false) {
+    return usage.refresh(
+      usageKey(provider, name),
+      async () => {
+        let body: string | null = null;
+        await serialized(async () => {
+          const state = await loadPool(provider);
+          requireAccount(state, name);
+          await syncActive(SWAP_PROVIDERS[provider], state);
+          body = readToken(provider, name);
+        });
+        if (!body) throw new UsageError("No saved login. Add this account again.");
+        let expectedBody: string = body;
+        return fetchUsage(provider, body, async (updated) => {
+          await serialized(async () => {
+            // A CLI refresh, replacement login or removal can win while fetching.
+            // Never overwrite that newer credential or swap the current account.
+            if (readToken(provider, name) !== expectedBody) return;
+            const state = await loadPool(provider);
+            if (!state.accounts[name]) return;
+            if (state.active === name && (await readLive(SWAP_PROVIDERS[provider])) === expectedBody) {
+              await writeLive(SWAP_PROVIDERS[provider], updated);
+            }
+            writeToken(provider, name, updated);
+            expectedBody = updated;
+          });
+        });
+      },
+      force,
+    );
+  }
 
   function toPoolAccount(account: PoolAccount): z.infer<typeof poolAccountSchema> {
     return {
@@ -680,6 +804,14 @@ export default async function plugin(bb: BbPluginApi) {
     return fs.readFile(file, "utf8").catch(() => null);
   }
 
+  function localUsageKey(provider: PoolProviderId, body: string | null): string | null {
+    const key = body ? `local/${provider}/${createHash("sha256").update(body).digest("hex")}` : null;
+    if (localKeys[provider] && localKeys[provider] !== key) usage.remove(localKeys[provider]!);
+    if (key) localKeys[provider] = key;
+    else delete localKeys[provider];
+    return key;
+  }
+
   async function localLogins(accounts: PoolAccount[]) {
     const home = os.homedir();
     const [claudeCreds, claudeProfile, codexAuth] = await Promise.all([
@@ -687,21 +819,33 @@ export default async function plugin(bb: BbPluginApi) {
       readOptional(path.join(home, ".claude.json")),
       readOptional(path.join(home, ".codex", "auth.json")),
     ]);
-    const mark = (provider: PoolProviderId, local: LocalLogin | null) =>
-      local && {
+    const mark = (provider: PoolProviderId, local: LocalLogin | null, body: string | null) => {
+      if (!local || !body) {
+        localUsageKey(provider, null);
+        return null;
+      }
+      const key = localUsageKey(provider, body)!;
+      void usage.refresh(key, () => fetchLocalUsage(provider, body));
+      return {
         ...local,
         inStack: accounts.some(
-          (a) => a.provider === provider && local.email !== null && a.email?.toLowerCase() === local.email.toLowerCase(),
+          (a) =>
+            a.provider === provider &&
+            local.email !== null &&
+            a.email?.toLowerCase() === local.email.toLowerCase(),
         ),
+        usage: usage.get(key),
       };
+    };
     return {
-      claude: mark("claude", readClaudeLocal(claudeCreds, claudeProfile)),
-      codex: mark("codex", readCodexLocal(codexAuth)),
+      claude: mark("claude", readClaudeLocal(claudeCreds, claudeProfile), claudeCreds),
+      codex: mark("codex", readCodexLocal(codexAuth), codexAuth),
     };
   }
 
   bb.rpc.register(rpcContract, {
     overview: async () => {
+      for (const id of ["claude", "codex", "grok"] as const) void history.refresh(id);
       const swap = await Promise.all(
         SWAP_IDS.map(async (id) => {
           const provider = SWAP_PROVIDERS[id];
@@ -736,9 +880,17 @@ export default async function plugin(bb: BbPluginApi) {
                 lastError: meta.lastError,
                 lastActivatedAt: meta.lastActivatedAt,
                 addedAt: meta.addedAt,
+                usage: (() => {
+                  void refreshUsage(id, name);
+                  return usage.get(usageKey(id, name));
+                })(),
               };
             }),
-            live: { email: email ?? savedMeta?.email ?? null, saved: Boolean(savedMeta), signedIn: key !== null },
+            live: {
+              email: email ?? savedMeta?.email ?? null,
+              saved: Boolean(savedMeta),
+              signedIn: key !== null,
+            },
           };
         }),
       );
@@ -756,6 +908,7 @@ export default async function plugin(bb: BbPluginApi) {
           localLogin: await localLogins(view.accounts),
         },
         login,
+        history: { claude: history.get("claude"), codex: history.get("codex"), grok: history.get("grok") },
       };
     },
     setAutoSwitch: async ({ enabled }) => {
@@ -782,7 +935,9 @@ export default async function plugin(bb: BbPluginApi) {
       await moveAccount(SWAP_PROVIDERS[provider], name, direction);
       return null;
     },
-    saveCurrent: async ({ provider }) => ({ name: await saveCurrent(SWAP_PROVIDERS[provider]) }),
+    saveCurrent: async ({ provider }) => ({
+      name: await saveCurrent(SWAP_PROVIDERS[provider]),
+    }),
     loginStart: async ({ provider }) => startLogin(provider),
     loginSubmit: async ({ code }) => submitLogin(code),
     loginCancel: async () => {
@@ -831,6 +986,26 @@ export default async function plugin(bb: BbPluginApi) {
       changed();
       return null;
     },
+    usageRefresh: async ({ provider, name }) => {
+      const state = await loadPool(provider);
+      requireAccount(state, name);
+      await refreshUsage(provider, name, true);
+      return null;
+    },
+    localUsageRefresh: async ({ provider }) => {
+      const body = await readOptional(
+        path.join(os.homedir(), provider === "claude" ? ".claude/.credentials.json" : ".codex/auth.json"),
+      );
+      const local = provider === "claude" ? readClaudeLocal(body, null) : readCodexLocal(body);
+      const key = localUsageKey(provider, local ? body : null);
+      if (!local || !key || !body) throw new Error("This machine is not signed in. Add an account.");
+      await usage.refresh(key, () => fetchLocalUsage(provider, body), true);
+      return null;
+    },
+    historyRefresh: async ({ provider }) => {
+      await history.refresh(provider, true);
+      return null;
+    },
   });
 
   // ── CLI ──────────────────────────────────────────────────────────────────
@@ -840,12 +1015,36 @@ export default async function plugin(bb: BbPluginApi) {
     name: "subs",
     summary: "Stack logins per AI subscription and switch when one runs out of quota",
     commands: [
-      { name: "list", summary: "Show saved accounts and their quota state", usage: "bb subs list [<provider>] [--json]" },
-      { name: "add", summary: "Save the login a CLI is using now (or a login file)", usage: `bb subs add <${swapList}> [<name>] [--from <file>] [--force]` },
-      { name: "use", summary: "Switch a provider to an account now", usage: `bb subs use <${swapList}> <name>` },
-      { name: "next", summary: "Mark the active account used up and switch to the next one", usage: `bb subs next <${swapList}>` },
-      { name: "reset", summary: "Clear out-of-quota marks", usage: `bb subs reset <${swapList}> [<name>]` },
-      { name: "remove", summary: "Forget an account", usage: `bb subs remove <${swapList}> <name>` },
+      {
+        name: "list",
+        summary: "Show saved accounts and their quota state",
+        usage: "bb subs list [<provider>] [--json]",
+      },
+      {
+        name: "add",
+        summary: "Save the login a CLI is using now (or a login file)",
+        usage: `bb subs add <${swapList}> [<name>] [--from <file>] [--force]`,
+      },
+      {
+        name: "use",
+        summary: "Switch a provider to an account now",
+        usage: `bb subs use <${swapList}> <name>`,
+      },
+      {
+        name: "next",
+        summary: "Mark the active account used up and switch to the next one",
+        usage: `bb subs next <${swapList}>`,
+      },
+      {
+        name: "reset",
+        summary: "Clear out-of-quota marks",
+        usage: `bb subs reset <${swapList}> [<name>]`,
+      },
+      {
+        name: "remove",
+        summary: "Forget an account",
+        usage: `bb subs remove <${swapList}> <name>`,
+      },
     ],
     async run(argv) {
       const json = argv.includes("--json");
@@ -858,7 +1057,9 @@ export default async function plugin(bb: BbPluginApi) {
       const [subcommand = "list", rawProvider, rawName] = positional;
       const provider = (): SwapProvider => {
         if (rawProvider === "claude" || rawProvider === "codex") {
-          throw new Error(`${rawProvider} accounts are managed by the Account Pooler: use the Subscription Accounts page or \`bb pool\`.`);
+          throw new Error(
+            `${rawProvider} accounts are managed by the Account Pooler: use the Subscription Accounts page or \`bb pool\`.`,
+          );
         }
         if (!rawProvider || !isSwapId(rawProvider)) throw new Error(`Provider must be one of ${swapList}.`);
         return SWAP_PROVIDERS[rawProvider];
@@ -875,9 +1076,18 @@ export default async function plugin(bb: BbPluginApi) {
                 JSON.stringify(
                   {
                     swap: Object.fromEntries(
-                      states.map(([id, s]) => [id, { active: s.active, accounts: s.order.map((n) => s.accounts[n]) }]),
+                      states.map(([id, s]) => [
+                        id,
+                        {
+                          active: s.active,
+                          accounts: s.order.map((n) => s.accounts[n]),
+                        },
+                      ]),
                     ),
-                    pool: { enabled: view.enabled, accounts: view.accounts.map(toPoolAccount) },
+                    pool: {
+                      enabled: view.enabled,
+                      accounts: view.accounts.map(toPoolAccount),
+                    },
                   },
                   null,
                   2,
@@ -906,7 +1116,9 @@ export default async function plugin(bb: BbPluginApi) {
             const state = await loadPool(spec.id);
             if (!state.active) return done("No active account.");
             const next = await markUsed(spec, state.active);
-            return done(next && next !== state.active ? `Switched to ${next}.` : "No other account has quota left.");
+            return done(
+              next && next !== state.active ? `Switched to ${next}.` : "No other account has quota left.",
+            );
           }
           case "reset": {
             const names = await resetAccounts(provider(), rawName ? [rawName] : null);
@@ -957,7 +1169,8 @@ function renderList(label: string, state: PoolState): string {
 }
 
 function renderPool(enabled: boolean, accounts: PoolAccount[]): string {
-  if (!enabled) return "Claude / Codex\n  Account Pooler is off. Turn it on from the Subscription Accounts page.";
+  if (!enabled)
+    return "Claude / Codex\n  Account Pooler is off. Turn it on from the Subscription Accounts page.";
   if (accounts.length === 0) return "Claude / Codex\n  (no accounts)";
   const rows = accounts.map(
     (a) => `  ${a.provider.padEnd(7)} ${(a.email ?? a.label).padEnd(32)} ${a.status}`,
@@ -966,7 +1179,10 @@ function renderPool(enabled: boolean, accounts: PoolAccount[]): string {
 }
 
 function done(stdout: string): { exitCode: number; stdout: string } {
-  return { exitCode: 0, stdout: stdout.endsWith("\n") ? stdout : `${stdout}\n` };
+  return {
+    exitCode: 0,
+    stdout: stdout.endsWith("\n") ? stdout : `${stdout}\n`,
+  };
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {

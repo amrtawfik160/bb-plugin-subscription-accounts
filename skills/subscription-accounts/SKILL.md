@@ -23,7 +23,22 @@ bb subs remove <provider> <name>
   and retries the turn. If every account is out, the retry is queued for the
   earliest reset.
 - Claude and Codex are handled by bb's Account Pooler (`bb pool ...`). The
-  page adds, orders and turns on or off those accounts through it.
+page adds, orders and turns on or off those accounts through it.
+
+The page also shows each account's subscription usage, remaining allowance,
+reset times and credits when reported by the provider. Usage refreshes every
+five minutes; each account has a manual Refresh action. Local Claude/Codex
+logins show usage before import. Missing metrics are unavailable, not zero.
+A switching cooldown is separate from measured quota. Failed requests keep
+dated last-known readings. Local Claude/Codex token expiry needs the CLI to
+refresh its login or a pooler-managed account.
+
+Usage trends show daily tokens, Today/Yesterday/30-day totals and model shares.
+Claude, Codex and Grok trends use local CLI logs and include all logins on the
+machine; never attribute those totals to one stacked account. Cursor trends
+use that account's server usage export. Dollars appear only when recorded;
+unknown costs are not zero. Partial scans are labeled. Known quota windows
+show a steady-pace estimate, not a promise about when quota will run out.
 
 To add another account, prefer the page's **Add account** button. It signs in
 under a temporary HOME, so the current login stays in place. Do not log out

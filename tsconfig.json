@@ -5,24 +5,19 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
-    "lib": [
-      "ES2022",
-      "DOM"
-    ],
-    "types": [
-      "node"
-    ],
+    "lib": ["ES2022", "DOM"],
+    "types": ["node"],
     "paths": {
-      "@/*": [
-        "./*"
-      ]
+      "@/*": ["./*"]
     },
     "noEmit": true,
     "skipLibCheck": false
   },
   "include": [
     "server.ts",
+    "server.test.ts",
     "app.tsx",
+    "app.test.tsx",
     "components",
     "lib",
     "hooks",
@@ -31,6 +26,15 @@
     "login.ts",
     "providers.ts",
     "providers.test.ts",
-    "pooler.ts"
+    "pooler.ts",
+    "usage.ts",
+    "usage-types.ts",
+    "usage-client.ts",
+    "usage.test.ts",
+    "history.ts",
+    "history-schema.ts",
+    "history.test.ts",
+    "cursor-history.ts",
+    "usage-history.tsx"
   ]
 }

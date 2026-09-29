@@ -1,0 +1,260 @@
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, waitFor, within } from "@testing-library/react";
+import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
+import { emptyUsage, type AccountUsage } from "./usage";
+import { aggregateHistory, emptyHistory } from "./history";
+
+afterEach(cleanup);
+
+const now = Date.now();
+function fixture(usage: AccountUsage) {
+  return {
+    now,
+    autoSwitch: true,
+    swap: [
+      {
+        id: "antigravity",
+        label: "Antigravity",
+        installed: true,
+        active: "test-account",
+        accounts: [
+          {
+            name: "test-account",
+            email: "test@example.com",
+            active: true,
+            exhaustedUntil: 0,
+            lastError: null,
+            usage,
+          },
+        ],
+        live: { email: "test@example.com", signedIn: true, saved: true },
+      },
+    ],
+    pool: {
+      installed: true,
+      enabled: false,
+      routing: { claude: false, codex: false },
+      accounts: [],
+      error: null,
+      localLogin: {
+        claude: null,
+        codex: {
+          email: "test@example.com",
+          plan: "Pro",
+          inStack: false,
+          usage,
+        },
+      },
+    },
+    login: null,
+  };
+}
+
+const ready: AccountUsage = {
+  ...emptyUsage(),
+  status: "ready",
+  plan: "Pro",
+  fetchedAt: now,
+  metrics: [
+    {
+      label: "Gemini · weekly",
+      used: 75,
+      remaining: 25,
+      limit: 100,
+      unit: "percent",
+      resetAt: now + 3_600_000,
+    },
+  ],
+};
+
+describe("subscription usage page", () => {
+  it("shows calendar trends, honest totals, model shares, daily values and refresh", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const refresh = vi.fn(async () => null);
+    const history = aggregateHistory(
+      [
+        { id: null, at: now, model: "test-model", tokens: 900_000, costUsd: null },
+        { id: null, at: now - 86_400_000, model: "other-model", tokens: 21_000, costUsd: 0.67 },
+      ],
+      now,
+    );
+    const slot = renderSlot(
+      app.navPanels[0],
+      { subPath: "" },
+      {
+        rpc: {
+          overview: () => ({
+            ...fixture(ready),
+            history: { claude: emptyHistory(), codex: history, grok: emptyHistory() },
+          }),
+          historyRefresh: refresh,
+        },
+      },
+    );
+    await slot.findByText("75% used");
+    fireEvent.click(slot.getByRole("tab", { name: "Codex" }));
+    expect(slot.getByText(/Shared CLI records/)).toBeTruthy();
+    const totals = within(slot.getByText("Yesterday").closest("dl")!);
+    expect(totals.getByText("$0.67 · 21K tokens")).toBeTruthy();
+    expect(totals.getAllByText("Cost not reported")).toHaveLength(2);
+    expect(slot.getByRole("img", { name: "Daily token usage over the last 30 days" })).toBeTruthy();
+    fireEvent.click(slot.getByRole("button", { name: "7 days" }));
+    expect(slot.getByRole("img", { name: "Daily token usage over the last 7 days" })).toBeTruthy();
+    fireEvent.click(slot.getByText("Daily totals"));
+    expect(slot.getByRole("table").querySelectorAll("tbody tr")).toHaveLength(7);
+    expect(slot.getByText("test-model")).toBeTruthy();
+    fireEvent.click(slot.getByRole("button", { name: "Refresh history for Codex" }));
+    await waitFor(() => expect(refresh).toHaveBeenCalledWith({ provider: "codex" }));
+    expect(slot.getByRole("link", { name: "Status" }).getAttribute("href")).toBe(
+      "https://status.openai.com/",
+    );
+    slot.lifecycle.unmount();
+  });
+
+  it("retains stale trends and labels partial records and source errors", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const history = {
+      ...aggregateHistory([{ id: null, at: now, model: "model", tokens: 12, costUsd: null }], now),
+      status: "error" as const,
+      partial: true,
+      error: "Could not read usage records.",
+    };
+    const slot = renderSlot(
+      app.navPanels[0],
+      { subPath: "" },
+      {
+        rpc: {
+          overview: () => ({
+            ...fixture(ready),
+            history: { claude: emptyHistory(), codex: history, grok: emptyHistory() },
+          }),
+        },
+      },
+    );
+    await slot.findByText("75% used");
+    fireEvent.click(slot.getByRole("tab", { name: "Codex" }));
+    expect(slot.getByRole("img")).toBeTruthy();
+    expect(slot.getByText(/Partial records/)).toBeTruthy();
+    expect(slot.getByText(/Could not read usage records.*Showing the last successful reading/)).toBeTruthy();
+    slot.lifecycle.unmount();
+  });
+
+  it("does not relabel yesterday’s stale records as today after midnight", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const yesterday = new Date(2026, 8, 28, 12).getTime();
+    const history = {
+      ...aggregateHistory(
+        [{ id: null, at: yesterday, model: "model", tokens: 900, costUsd: 0.67 }],
+        yesterday,
+      ),
+      status: "error" as const,
+      error: "Offline",
+    };
+    const slot = renderSlot(
+      app.navPanels[0],
+      { subPath: "" },
+      {
+        rpc: {
+          overview: () => ({
+            ...fixture(ready),
+            now: new Date(2026, 8, 29, 12).getTime(),
+            history: { claude: emptyHistory(), codex: history, grok: emptyHistory() },
+          }),
+        },
+      },
+    );
+    await slot.findByText("75% used");
+    fireEvent.click(slot.getByRole("tab", { name: "Codex" }));
+    expect(within(slot.getByText("Today").parentElement!).getByText("No data")).toBeTruthy();
+    expect(within(slot.getByText("Yesterday").parentElement!).getByText("$0.67 · 900 tokens")).toBeTruthy();
+    slot.lifecycle.unmount();
+  });
+  it("shows used quota, remaining allowance and explicit reset countdowns", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const refresh = vi.fn(async () => null);
+    const slot = renderSlot(
+      app.navPanels[0],
+      { subPath: "" },
+      { rpc: { overview: () => fixture(ready), usageRefresh: refresh } },
+    );
+    await slot.findByText("75% used");
+    expect(slot.getByText("25% left")).toBeTruthy();
+    expect(slot.getByText("Resets in 1h 0m")).toBeTruthy();
+    expect(slot.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("75");
+    fireEvent.click(slot.getByRole("button", { name: "Refresh usage for test-account" }));
+    await waitFor(() =>
+      expect(refresh).toHaveBeenCalledWith({
+        provider: "antigravity",
+        name: "test-account",
+      }),
+    );
+    slot.lifecycle.unmount();
+  });
+
+  it("keeps stale usage visible with the fetch error", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const slot = renderSlot(
+      app.navPanels[0],
+      { subPath: "" },
+      {
+        rpc: {
+          overview: () =>
+            fixture({
+              ...ready,
+              status: "error",
+              error: "Usage service unavailable. Refresh to retry.",
+            }),
+        },
+      },
+    );
+    await slot.findByText("75% used");
+    expect(slot.getByText(/Last known usage/)).toBeTruthy();
+    expect(slot.getByText(/Showing the last successful reading/)).toBeTruthy();
+    slot.lifecycle.unmount();
+  });
+
+  it("shows loading and unavailable quota without inventing zero usage", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const slot = renderSlot(
+      app.navPanels[0],
+      { subPath: "" },
+      { rpc: { overview: () => fixture(emptyUsage()) } },
+    );
+    await slot.findByText("Fetching subscription usage…");
+    expect(slot.queryByRole("progressbar")).toBeNull();
+    slot.lifecycle.unmount();
+    const unavailable = renderSlot(
+      app.navPanels[0],
+      { subPath: "" },
+      {
+        rpc: {
+          overview: () => fixture({ ...emptyUsage(), status: "unavailable", fetchedAt: now }),
+        },
+      },
+    );
+    await unavailable.findByText(/The provider did not report usage/);
+    expect(unavailable.queryByText("0% used")).toBeNull();
+    unavailable.lifecycle.unmount();
+  });
+
+  it("shows local Codex usage while the pooler is disabled", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const refresh = vi.fn(async () => null);
+    const slot = renderSlot(
+      app.navPanels[0],
+      { subPath: "" },
+      { rpc: { overview: () => fixture(ready), localUsageRefresh: refresh } },
+    );
+    await slot.findByText("75% used");
+    fireEvent.click(slot.getByRole("tab", { name: "Codex" }));
+    expect(slot.getByText("75% used")).toBeTruthy();
+    fireEvent.click(
+      slot.getByRole("button", {
+        name: "Refresh usage for machine Codex login",
+      }),
+    );
+    await waitFor(() => expect(refresh).toHaveBeenCalledWith({ provider: "codex" }));
+    slot.lifecycle.unmount();
+  });
+});
