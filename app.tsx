@@ -1013,6 +1013,11 @@ function AllQuotas({ data, onOpenProvider }: { data: Overview; onOpenProvider: (
           const swap = data.swap.find((section) => section.id === id);
           const accounts = data.pool.accounts.filter((account) => account.provider === id);
           const local = id === "claude" || id === "codex" ? data.pool.localLogin[id] : null;
+          const localExtraMetrics = local?.inStack
+            ? local.usage.metrics.filter(
+                (metric) => !["5-hour window", "Weekly window"].includes(metric.label),
+              )
+            : [];
           const usageRows = swap
             ? swap.accounts.map((account) => ({
                 key: account.name,
@@ -1081,7 +1086,25 @@ function AllQuotas({ data, onOpenProvider }: { data: Overview; onOpenProvider: (
                     ) : null}
                   </div>
                 ))}
-                {!usageRows.length && !accounts.length ? (
+                {local && localExtraMetrics.length ? (
+                  <div className="space-y-2">
+                    <p className="break-words text-xs text-muted-foreground">
+                      {local.email ?? "Machine login"} · CLI allowances
+                      {local.usage.plan ? ` · ${local.usage.plan}` : ""}
+                    </p>
+                    <div className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
+                      {localExtraMetrics.map((metric) => (
+                        <QuotaMeter key={metric.label} row={metric} now={data.now} />
+                      ))}
+                    </div>
+                    {local.usage.error ? (
+                      <p className="break-words text-xs text-destructive">
+                        {local.usage.error} · Last known usage
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+                {!usageRows.length && !accounts.length && !localExtraMetrics.length ? (
                   <p className="text-xs text-muted-foreground">
                     No connected accounts. Open {label} to add one.
                   </p>
