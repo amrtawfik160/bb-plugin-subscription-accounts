@@ -18,7 +18,12 @@ bb moves to the next one and carries on with the task.
 - **Usage history.** Daily token trends with 7/30-day views, Today/Yesterday/30-day
   totals, and model breakdowns. Claude, Codex and Grok history comes from this
   machine's CLI records across all logins; Cursor uses each account's usage export.
-  Costs appear only when recorded. Antigravity's quota API has no daily history.
+  Missing costs are estimated from input, output and cache tokens at current API
+  prices, marked with `~`. Reported costs are preserved; unpriced models are shown
+  separately. These are API-equivalent costs, not subscription charges.
+  Prices refresh hourly from LiteLLM, models.dev and the
+  [OpenUsage supplement](https://github.com/robinebers/openusage), with an offline snapshot.
+  Antigravity's quota API has no daily history.
   Known quota windows also show a steady-pace marker and estimated time to the limit.
 - **Switches accounts automatically.** When a thread hits a plan limit, the
   plugin marks that account as used up until its reset time, switches to the

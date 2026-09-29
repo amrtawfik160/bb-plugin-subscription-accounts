@@ -35,6 +35,7 @@ import { type PoolAccount, pooler } from "./pooler.js";
 import { UsageCache, usageSchema, UsageError } from "./usage.js";
 import { createLocalUsageClient, createUsageClient } from "./usage-client.js";
 import { HistoryCache } from "./history.js";
+import { PricingStore } from "./pricing.js";
 import { historySchema } from "./history-schema.js";
 import {
   type PoolProviderId,
@@ -137,7 +138,11 @@ const overviewSchema = z.object({
     }),
   }),
   login: loginSchema.nullable(),
-  history: z.object({ claude: historySchema, codex: historySchema, grok: historySchema }),
+  history: z.object({
+    claude: historySchema,
+    codex: historySchema,
+    grok: historySchema,
+  }),
 });
 
 const swapTarget = z.object({ provider: swapIdSchema, name: z.string() });
@@ -185,7 +190,10 @@ export const rpcContract = defineRpcContract({
   },
   poolRefresh: { input: z.object({ id: z.string() }), output: ok },
   usageRefresh: { input: swapTarget, output: ok },
-  historyRefresh: { input: z.object({ provider: z.enum(["claude", "codex", "grok"]) }), output: ok },
+  historyRefresh: {
+    input: z.object({ provider: z.enum(["claude", "codex", "grok"]) }),
+    output: ok,
+  },
   localUsageRefresh: {
     input: z.object({ provider: poolIdSchema }),
     output: ok,
@@ -194,14 +202,28 @@ export const rpcContract = defineRpcContract({
 
 export default async function plugin(bb: BbPluginApi) {
   const usage = new UsageCache(() => changed());
-  const history = new HistoryCache(() => changed());
+  const history = new HistoryCache(
+    () => changed(),
+    undefined,
+    undefined,
+    undefined,
+    () => pricing.current(),
+  );
   const usageController = new AbortController();
-  const fetchUsage = createUsageClient(fetch, usageController.signal, async () => {
-    const values = await settings.get();
-    return values.antigravityOAuthClientId && values.antigravityOAuthClientSecret
-      ? { clientId: values.antigravityOAuthClientId, clientSecret: values.antigravityOAuthClientSecret }
-      : null;
-  });
+  const fetchUsage = createUsageClient(
+    fetch,
+    usageController.signal,
+    async () => {
+      const values = await settings.get();
+      return values.antigravityOAuthClientId && values.antigravityOAuthClientSecret
+        ? {
+            clientId: values.antigravityOAuthClientId,
+            clientSecret: values.antigravityOAuthClientSecret,
+          }
+        : null;
+    },
+    () => pricing.current(),
+  );
   const fetchLocalUsage = createLocalUsageClient(fetch, usageController.signal);
   const localKeys: Partial<Record<PoolProviderId, string>> = {};
   const usageKey = (provider: SwapProviderId, name: string) => `${provider}/${name}`;
@@ -240,6 +262,11 @@ export default async function plugin(bb: BbPluginApi) {
   settings.onChange(() => changed());
 
   const db = bb.storage.database();
+  const pricing = new PricingStore(
+    fetch,
+    usageController.signal,
+    path.join(path.dirname(db.name), "pricing-cache.json"),
+  );
   bb.storage.migrate(db, [
     `CREATE TABLE IF NOT EXISTS tokens (
        provider TEXT NOT NULL, name TEXT NOT NULL, body TEXT NOT NULL, updated_at INTEGER NOT NULL,
@@ -908,7 +935,11 @@ export default async function plugin(bb: BbPluginApi) {
           localLogin: await localLogins(view.accounts),
         },
         login,
-        history: { claude: history.get("claude"), codex: history.get("codex"), grok: history.get("grok") },
+        history: {
+          claude: history.get("claude"),
+          codex: history.get("codex"),
+          grok: history.get("grok"),
+        },
       };
     },
     setAutoSwitch: async ({ enabled }) => {

@@ -5,27 +5,38 @@ import { Icon } from "@/components/ui/icon";
 import { cn } from "@/lib/utils";
 
 const compact = (n: number) =>
-  new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(n);
+  new Intl.NumberFormat(undefined, {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(n);
 const dollars = (n: number) =>
-  new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" }).format(n);
+  new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: "USD",
+  }).format(n);
 export function historyTotal(rows: UsageTotals[]): UsageTotals {
   const active = rows.filter((row) => row.events > 0);
+  const priced = active.filter((row) => row.costUsd !== null);
   return {
     tokens: active.reduce((sum, row) => sum + row.tokens, 0),
     events: active.reduce((sum, row) => sum + row.events, 0),
-    costUsd:
-      active.length && active.every((row) => row.costUsd !== null)
-        ? active.reduce((sum, row) => sum + row.costUsd!, 0)
-        : null,
+    costUsd: priced.length ? priced.reduce((sum, row) => sum + row.costUsd!, 0) : null,
+    estimated: active.some((row) => row.estimated),
+    unpricedTokens: active.reduce(
+      (sum, row) => sum + (row.unpricedTokens ?? (row.costUsd === null ? row.tokens : 0)),
+      0,
+    ),
   };
 }
 function Total({ row }: { row: UsageTotals | undefined }) {
   if (!row?.events) return <span className="text-muted-foreground">No data</span>;
   return (
-    <span className="tabular-nums">
-      {row.costUsd !== null ? `${dollars(row.costUsd)} · ` : ""}
+    <span className="tabular-nums" title={row.estimated ? "Estimated at current API prices" : undefined}>
+      {row.costUsd !== null
+        ? `${row.estimated ? "~" : ""}${dollars(row.costUsd)}${row.unpricedTokens ? " (partial)" : ""} · `
+        : ""}
       {compact(row.tokens)} tokens
-      {row.costUsd === null ? <span className="ml-2 text-muted-foreground">Cost not reported</span> : null}
+      {row.costUsd === null ? <span className="ml-2 text-muted-foreground">Price unavailable</span> : null}
     </span>
   );
 }
@@ -131,7 +142,7 @@ export function HistoryPanel({
                 rx="2"
                 fill="currentColor"
               >
-                <title>{`${day.date}: ${new Intl.NumberFormat().format(day.tokens)} tokens${day.costUsd !== null ? ` · ${dollars(day.costUsd)}` : ""}`}</title>
+                <title>{`${day.date}: ${new Intl.NumberFormat().format(day.tokens)} tokens${day.costUsd !== null ? ` · ${day.estimated ? "~" : ""}${dollars(day.costUsd)}${day.unpricedTokens ? " (partial)" : ""}` : ""}`}</title>
               </rect>
             ))}
           </svg>
@@ -175,6 +186,9 @@ export function HistoryPanel({
                 <div className="flex flex-wrap justify-between gap-2">
                   <span className="min-w-0 break-all">{model.model}</span>
                   <span className="tabular-nums text-muted-foreground">
+                    {model.costUsd !== null
+                      ? `${model.estimated ? "~" : ""}${dollars(model.costUsd)}${model.unpricedTokens ? " (partial)" : ""} · `
+                      : ""}
                     {compact(model.tokens)} tokens ·{" "}
                     {total.tokens ? Math.round((model.tokens / total.tokens) * 100) : 0}%
                   </span>
@@ -182,7 +196,9 @@ export function HistoryPanel({
                 <div className="h-1 rounded-full bg-muted">
                   <div
                     className="h-full rounded-full bg-primary"
-                    style={{ width: `${total.tokens ? (model.tokens / total.tokens) * 100 : 0}%` }}
+                    style={{
+                      width: `${total.tokens ? (model.tokens / total.tokens) * 100 : 0}%`,
+                    }}
                   />
                 </div>
               </li>
@@ -200,7 +216,7 @@ export function HistoryPanel({
         <details className="text-xs">
           <summary className="min-h-11 cursor-pointer py-3 font-medium sm:min-h-8">Daily totals</summary>
           <table className="w-full text-left">
-            <caption className="sr-only">Daily tokens and recorded cost for the last {range} days</caption>
+            <caption className="sr-only">Daily tokens and API cost for the last {range} days</caption>
             <thead>
               <tr className="text-muted-foreground">
                 <th scope="col" className="py-2 font-normal">
@@ -237,23 +253,41 @@ export function HistoryPanel({
           {stale ? " Showing the last successful reading." : ""}
         </p>
       ) : null}
+      {total.unpricedTokens ? (
+        <p className="text-xs text-muted-foreground">
+          Price unavailable for {compact(total.unpricedTokens)} tokens. Cost totals include priced usage only.
+        </p>
+      ) : null}
       <p className="text-xs text-muted-foreground">
         {history.refreshing || pending
           ? "Refreshing history…"
           : history.fetchedAt
             ? `${stale ? "Last known history" : "Updated"} ${new Date(history.fetchedAt).toLocaleTimeString()}. `
             : ""}
-        Costs appear only when recorded; they may differ from your subscription bill.
+        ~ Estimated at current API prices, including cache rates; not subscription charges.
+        {history.pricingAsOf ? ` Prices checked ${new Date(history.pricingAsOf).toLocaleDateString()}.` : ""}
       </p>
     </section>
   );
 }
 
 const LINKS = {
-  antigravity: { status: "https://status.cloud.google.com/", dashboard: "https://antigravity.google/" },
-  claude: { status: "https://status.claude.com/", dashboard: "https://claude.ai/settings/usage" },
-  codex: { status: "https://status.openai.com/", dashboard: "https://chatgpt.com/codex/settings/usage" },
-  cursor: { status: "https://status.cursor.com/", dashboard: "https://cursor.com/dashboard?tab=usage" },
+  antigravity: {
+    status: "https://status.cloud.google.com/",
+    dashboard: "https://antigravity.google/",
+  },
+  claude: {
+    status: "https://status.claude.com/",
+    dashboard: "https://claude.ai/settings/usage",
+  },
+  codex: {
+    status: "https://status.openai.com/",
+    dashboard: "https://chatgpt.com/codex/settings/usage",
+  },
+  cursor: {
+    status: "https://status.cursor.com/",
+    dashboard: "https://cursor.com/dashboard?tab=usage",
+  },
   grok: { status: "https://status.x.ai/", dashboard: "https://grok.com/" },
 };
 export function ProviderLinks({ provider }: { provider: keyof typeof LINKS }) {

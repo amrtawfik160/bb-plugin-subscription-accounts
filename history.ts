@@ -5,6 +5,7 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 import { number, object, textValue, timestamp } from "./usage.js";
 import { USAGE_TTL_MS, type UsageHistory, type UsageTotals } from "./usage-types.js";
+import type { ModelPricing, TokenUsage } from "./pricing.js";
 
 export function emptyHistory(source: UsageHistory["source"] = "local"): UsageHistory {
   return {
@@ -26,6 +27,8 @@ export interface UsageEvent {
   model: string;
   tokens: number;
   costUsd: number | null;
+  tokenUsage?: TokenUsage;
+  request?: boolean;
 }
 const count = (v: unknown) => {
   const n = number(v);
@@ -47,12 +50,13 @@ export function historyStart(now: number): number {
   return d.getTime();
 }
 
-/** Local calendar days, including gaps. Missing costs stay unknown, never zero. */
+/** Local calendar days, including gaps. Reported costs take precedence over API estimates. */
 export function aggregateHistory(
   events: UsageEvent[],
   now: number,
   source: UsageHistory["source"] = "local",
   partial = false,
+  pricing?: ModelPricing,
 ): UsageHistory {
   const byId = new Map<string, UsageEvent>();
   const unique: UsageEvent[] = [];
@@ -68,10 +72,17 @@ export function aggregateHistory(
   const days = new Map<string, UsageTotals>();
   const models = new Map<string, UsageTotals>();
   const add = (map: Map<string, UsageTotals>, key: string, e: UsageEvent) => {
-    const total = map.get(key) ?? { tokens: 0, costUsd: 0, events: 0 };
+    const total = map.get(key) ?? { tokens: 0, costUsd: null, events: 0 };
     total.tokens += e.tokens;
     total.events++;
-    total.costUsd = total.costUsd === null || e.costUsd === null ? null : total.costUsd + e.costUsd;
+    const estimate =
+      e.costUsd === null && e.tokenUsage
+        ? (pricing?.estimate(e.model, e.tokenUsage, e.request) ?? null)
+        : null;
+    const amount = e.costUsd ?? estimate;
+    if (amount !== null) total.costUsd = (total.costUsd ?? 0) + amount;
+    else if (e.tokens) total.unpricedTokens = (total.unpricedTokens ?? 0) + e.tokens;
+    if (estimate !== null) total.estimated = true;
     map.set(key, total);
   };
   for (const event of unique) {
@@ -82,13 +93,17 @@ export function aggregateHistory(
   const d = new Date(historyStart(now));
   for (let i = 0; i < 30; i++, d.setDate(d.getDate() + 1)) {
     const date = dateKey(d.getTime());
-    daily.push({ date, ...(days.get(date) ?? { tokens: 0, costUsd: null, events: 0 }) });
+    daily.push({
+      date,
+      ...(days.get(date) ?? { tokens: 0, costUsd: null, events: 0 }),
+    });
   }
   return {
     ...emptyHistory(source),
     status: unique.length ? "ready" : "unavailable",
     fetchedAt: now,
     partial,
+    ...(pricing ? { pricingAsOf: pricing.data.checkedAt } : {}),
     days: unique.length ? daily : [],
     models: [...models].map(([model, t]) => ({ model, ...t })).sort((a, b) => b.tokens - a.tokens),
   };
@@ -101,6 +116,7 @@ export function createLogParser(provider: "claude" | "codex" | "grok") {
   let sawMeta = false;
   let childCreated: number | null = null;
   let childReplay = false;
+  let fast = false;
   return (raw: unknown): UsageEvent[] => {
     const row = object(raw);
     const at = timestamp(row.timestamp);
@@ -111,11 +127,13 @@ export function createLogParser(provider: "claude" | "codex" | "grok") {
         output = count(u.output_tokens);
       if (!at || input === null || output === null || row.isApiErrorMessage === true) return [];
       const id = textValue(message.id);
-      const tokens =
-        input +
-        output +
-        (count(u.cache_read_input_tokens) ?? 0) +
-        (count(u.cache_creation_input_tokens) ?? 0);
+      const cacheRead = count(u.cache_read_input_tokens) ?? 0;
+      const creation = object(u.cache_creation);
+      const cacheWrite1h = count(creation.ephemeral_1h_input_tokens) ?? 0;
+      const cacheWrite =
+        count(creation.ephemeral_5m_input_tokens) ??
+        Math.max(0, (count(u.cache_creation_input_tokens) ?? 0) - cacheWrite1h);
+      const tokens = input + output + cacheRead + cacheWrite + cacheWrite1h;
       return [
         {
           id: id ? `claude:${id}` : null,
@@ -123,6 +141,14 @@ export function createLogParser(provider: "claude" | "codex" | "grok") {
           model: textValue(message.model) ?? "Unknown model",
           tokens,
           costUsd: cost(row.costUSD),
+          tokenUsage: {
+            input,
+            output,
+            cacheRead,
+            cacheWrite,
+            cacheWrite1h,
+            fast: u.speed === "fast",
+          },
         },
       ];
     }
@@ -142,6 +168,8 @@ export function createLogParser(provider: "claude" | "codex" | "grok") {
         if (input === null) return [];
         const ticks = cost(u.costUsdTicks) ?? (entries.length === 1 ? cost(usage.costUsdTicks) : null);
         const id = textValue(meta.eventId);
+        const cacheRead = Math.min(input, count(u.cachedReadTokens) ?? 0);
+        const cacheWrite = Math.min(input - cacheRead, count(u.cacheCreationTokens) ?? 0);
         return [
           {
             id: id ? `grok:${id}:${model}` : null,
@@ -149,6 +177,13 @@ export function createLogParser(provider: "claude" | "codex" | "grok") {
             model,
             tokens: input + output,
             costUsd: ticks === null ? null : ticks / 1e10,
+            tokenUsage: {
+              input: input - cacheRead - cacheWrite,
+              output,
+              cacheRead,
+              cacheWrite,
+              cacheWrite1h: 0,
+            },
           },
         ];
       });
@@ -167,9 +202,16 @@ export function createLogParser(provider: "claude" | "codex" | "grok") {
     }
     if (row.type === "turn_context") {
       model = textValue(payload.model) ?? model;
+      if (payload.service_tier !== undefined)
+        fast = payload.service_tier === "fast" || payload.service_tier === "priority";
       return [];
     }
     if (row.type !== "event_msg") return [];
+    if (payload.type === "thread_settings_applied") {
+      const tier = object(payload.thread_settings).service_tier ?? payload.service_tier;
+      fast = tier === "fast" || tier === "priority";
+      return [];
+    }
     if (payload.type === "task_started" && childReplay) {
       const started = timestamp(payload.started_at);
       if (started !== null && started >= Math.floor((childCreated ?? at ?? Infinity) / 1000) * 1000)
@@ -180,7 +222,12 @@ export function createLogParser(provider: "claude" | "codex" | "grok") {
     const info = object(payload.info);
     const fields = (v: unknown) => {
       const u = object(v);
-      return [count(u.input_tokens) ?? 0, count(u.output_tokens) ?? 0, count(u.total_tokens) ?? 0];
+      return [
+        count(u.input_tokens) ?? 0,
+        count(u.output_tokens) ?? 0,
+        count(u.total_tokens) ?? 0,
+        count(u.cached_input_tokens) ?? 0,
+      ];
     };
     const total = info.total_token_usage ? fields(info.total_token_usage) : null;
     if (childReplay) {
@@ -196,7 +243,24 @@ export function createLogParser(provider: "claude" | "codex" | "grok") {
     const tokens = delta[2] || delta[0] + delta[1];
     if (!tokens) return [];
     model = textValue(payload.model ?? info.model) ?? model;
-    return [{ id: `codex:${at}:${model}:${delta.join(":")}`, at, model, tokens, costUsd: null }];
+    const cached = Math.min(delta[0], delta[3]);
+    return [
+      {
+        id: `codex:${at}:${model}:${(total ?? delta).join(":")}`,
+        at,
+        model,
+        tokens,
+        costUsd: null,
+        tokenUsage: {
+          input: delta[0] - cached,
+          output: delta[1],
+          cacheRead: cached,
+          cacheWrite: 0,
+          cacheWrite1h: 0,
+          fast,
+        },
+      },
+    ];
   };
 }
 
@@ -212,6 +276,7 @@ export class HistoryCache {
     private home = os.homedir(),
     private env = process.env,
     private now = Date.now,
+    private pricing?: () => Promise<ModelPricing>,
   ) {}
   get(provider: LocalProvider) {
     return this.views.get(provider) ?? emptyHistory();
@@ -311,7 +376,10 @@ export class HistoryCache {
     let bytes = 0;
     const seen = new Set<string>();
     const recentFiles = await Promise.all(
-      files.map(async (file) => ({ file, stat: await fs.stat(file).catch(() => null) })),
+      files.map(async (file) => ({
+        file,
+        stat: await fs.stat(file).catch(() => null),
+      })),
     );
     recentFiles.sort((a, b) => (b.stat?.mtimeMs ?? 0) - (a.stat?.mtimeMs ?? 0));
     for (const { file, stat } of recentFiles) {
@@ -349,7 +417,8 @@ export class HistoryCache {
             filePartial = true;
             continue;
           }
-          if (!/usage|token_count|turn_context|session_meta|task_started/.test(line)) continue;
+          if (!/usage|token_count|turn_context|session_meta|task_started|thread_settings_applied/.test(line))
+            continue;
           try {
             events.push(...parser(JSON.parse(line)).filter((e) => e.at >= historyStart(this.now())));
           } catch {
@@ -361,12 +430,18 @@ export class HistoryCache {
         stream.destroy();
       }
       if (!this.disposed)
-        this.files.set(file, { size: stat.size, mtime: stat.mtimeMs, events, partial: filePartial });
+        this.files.set(file, {
+          size: stat.size,
+          mtime: stat.mtimeMs,
+          events,
+          partial: filePartial,
+        });
       for (const event of events) all.push(event);
       partial ||= filePartial;
     }
     for (const file of this.files.keys())
       if (roots.some((root) => file.startsWith(root + path.sep)) && !seen.has(file)) this.files.delete(file);
-    return aggregateHistory(all, this.now(), "local", partial);
+    const pricing = all.some((e) => e.costUsd === null && e.tokenUsage) ? await this.pricing?.() : undefined;
+    return aggregateHistory(all, this.now(), "local", partial, pricing);
   }
 }

@@ -1,8 +1,9 @@
 import { aggregateHistory, emptyHistory, historyStart, type UsageEvent } from "./history.js";
 import type { UsageHistory } from "./usage-types.js";
+import type { ModelPricing } from "./pricing.js";
 
 /** CSV quotes may contain commas, escaped quotes and newlines. */
-export function parseCursorHistory(csv: string, now = Date.now()): UsageHistory {
+export function parseCursorHistory(csv: string, now = Date.now(), pricing?: ModelPricing): UsageHistory {
   const rows: string[][] = [];
   let row: string[] = [],
     cell = "",
@@ -64,15 +65,30 @@ export function parseCursorHistory(csv: string, now = Date.now()): UsageHistory 
       partial = true;
       continue;
     }
-    events.push({ id: null, at, model, tokens: counts.reduce((a, b) => a + b, 0), costUsd: null });
+    events.push({
+      id: null,
+      at,
+      model,
+      tokens: counts.reduce((a, b) => a + b, 0),
+      costUsd: null,
+      request: false,
+      tokenUsage: {
+        input: counts[1],
+        output: counts[3],
+        cacheRead: counts[2],
+        cacheWrite: counts[0],
+        cacheWrite1h: 0,
+      },
+    });
   }
-  return aggregateHistory(events, now, "cursor", partial);
+  return aggregateHistory(events, now, "cursor", partial, pricing);
 }
 
 export async function fetchCursorHistory(
   fetcher: typeof fetch,
   cookie: string,
   signal?: AbortSignal,
+  pricing?: () => Promise<ModelPricing>,
 ): Promise<UsageHistory> {
   const now = Date.now();
   const params = new URLSearchParams({
@@ -105,7 +121,7 @@ export async function fetchCursorHistory(
       await reader.cancel().catch(() => undefined);
       reader.releaseLock();
     }
-    return parseCursorHistory(csv, now);
+    return parseCursorHistory(csv, now, await pricing?.());
   } catch {
     return {
       ...emptyHistory("cursor"),

@@ -26,6 +26,8 @@ export interface UsageTotals {
   tokens: number;
   costUsd: number | null;
   events: number;
+  estimated?: boolean;
+  unpricedTokens?: number;
 }
 export interface UsageHistory {
   status: "loading" | "ready" | "unavailable" | "error";
@@ -37,6 +39,7 @@ export interface UsageHistory {
   partial: boolean;
   error: string | null;
   timeZone?: string;
+  pricingAsOf?: number;
 }
 
 /** Pace assumes steady use within a fixed window; it is never measured history. */

@@ -38,7 +38,11 @@ const codex = (total: number, last?: number, timestamp = at) => ({
   payload: {
     type: "token_count",
     info: {
-      total_token_usage: { input_tokens: total, output_tokens: 0, total_tokens: total },
+      total_token_usage: {
+        input_tokens: total,
+        output_tokens: 0,
+        total_tokens: total,
+      },
       ...(last !== undefined ? { last_token_usage: { input_tokens: last, total_tokens: last } } : {}),
     },
   },
@@ -57,10 +61,23 @@ describe("usage history", () => {
       now,
     );
     expect(history.days).toHaveLength(30);
-    expect(history.days.at(-1)).toMatchObject({ date: dateKey(now), tokens: 100, costUsd: null, events: 1 });
+    expect(history.days.at(-1)).toMatchObject({
+      date: dateKey(now),
+      tokens: 100,
+      costUsd: null,
+      events: 1,
+    });
     expect(history.days.at(-2)).toMatchObject({ tokens: 100, costUsd: 0.67 });
-    expect(history.models[0]).toMatchObject({ tokens: 200, costUsd: null, events: 2 });
-    expect(aggregateHistory([], now)).toMatchObject({ status: "unavailable", days: [] });
+    expect(history.models[0]).toMatchObject({
+      tokens: 200,
+      costUsd: 0.67,
+      events: 2,
+      unpricedTokens: 100,
+    });
+    expect(aggregateHistory([], now)).toMatchObject({
+      status: "unavailable",
+      days: [],
+    });
   });
   it("counts Claude cache tokens once and retains the richest streaming snapshot", () => {
     const parse = createLogParser("claude");
@@ -72,7 +89,7 @@ describe("usage history", () => {
       ],
       now,
     );
-    expect(history.models).toEqual([{ model: "claude-fable-5", tokens: 65, events: 1, costUsd: null }]);
+    expect(history.models).toMatchObject([{ model: "claude-fable-5", tokens: 65, events: 1, costUsd: null }]);
     expect(JSON.stringify(history)).not.toContain("request");
   });
   it("counts Codex turn deltas, ignores repeated totals and does not add cached/reasoning tokens again", () => {
@@ -88,7 +105,11 @@ describe("usage history", () => {
   });
   it("excludes parent history replayed into a Codex child, but seeds totals for its live turn", () => {
     const parse = createLogParser("codex");
-    parse({ type: "session_meta", timestamp: at, payload: { forked_from_id: "parent" } });
+    parse({
+      type: "session_meta",
+      timestamp: at,
+      payload: { forked_from_id: "parent" },
+    });
     expect(parse(codex(100, 100))).toEqual([]);
     parse({
       type: "event_msg",
@@ -96,7 +117,11 @@ describe("usage history", () => {
       payload: { type: "task_started", started_at: now / 1000 - 10 },
     });
     expect(parse(codex(120, 20))).toEqual([]);
-    parse({ type: "event_msg", timestamp: at, payload: { type: "task_started", started_at: now / 1000 } });
+    parse({
+      type: "event_msg",
+      timestamp: at,
+      payload: { type: "task_started", started_at: now / 1000 },
+    });
     expect(parse(codex(150))).toMatchObject([{ tokens: 30 }]);
   });
   it("reads Grok durable completed-turn usage and provider-reported tick costs", () => {
@@ -109,7 +134,12 @@ describe("usage history", () => {
           usage: {
             costUsdTicks: 6_700_000_000,
             modelUsage: {
-              grok: { inputTokens: 100, cachedReadTokens: 50, outputTokens: 10, reasoningTokens: 5 },
+              grok: {
+                inputTokens: 100,
+                cachedReadTokens: 50,
+                outputTokens: 10,
+                reasoningTokens: 5,
+              },
             },
           },
         },
@@ -128,7 +158,10 @@ describe("usage history", () => {
       const file = path.join(dir, "session.jsonl");
       await fs.writeFile(
         file,
-        JSON.stringify({ ...claude("first", 10), privateText: "private-conversation" }) + "\n",
+        JSON.stringify({
+          ...claude("first", 10),
+          privateText: "private-conversation",
+        }) + "\n",
       );
       await cache.refresh("claude");
       expect(cache.get("claude").days.at(-1)?.tokens).toBe(45);
@@ -138,7 +171,10 @@ describe("usage history", () => {
       expect(JSON.stringify(cache.get("claude"))).not.toContain("private-conversation");
       await fs.unlink(file);
       await cache.refresh("claude", true);
-      expect(cache.get("claude")).toMatchObject({ status: "unavailable", days: [] });
+      expect(cache.get("claude")).toMatchObject({
+        status: "unavailable",
+        days: [],
+      });
     } finally {
       cache.dispose();
       await fs.rm(home, { recursive: true, force: true });
@@ -166,17 +202,30 @@ describe("usage history", () => {
   it("preserves Cursor history when the next export fails", async () => {
     const cache = new UsageCache(vi.fn(), () => now);
     const history = aggregateHistory([event()], now, "cursor");
-    await cache.refresh("cursor", async () => ({ plan: "Pro", metrics: [], history }));
+    await cache.refresh("cursor", async () => ({
+      plan: "Pro",
+      metrics: [],
+      history,
+    }));
     await cache.refresh(
       "cursor",
       async () => ({
         plan: "Pro",
         metrics: [],
-        history: { ...history, status: "error", days: [], models: [], error: "Failed" },
+        history: {
+          ...history,
+          status: "error",
+          days: [],
+          models: [],
+          error: "Failed",
+        },
       }),
       true,
     );
-    expect(cache.get("cursor").history).toMatchObject({ status: "error", days: history.days });
+    expect(cache.get("cursor").history).toMatchObject({
+      status: "error",
+      days: history.days,
+    });
   });
   it("shows Claude model-specific limits and Codex extra rate limits", () => {
     expect(mapClaude({ seven_day_fable: { utilization: 57, resets_at: at } }).metrics).toMatchObject([
@@ -188,7 +237,11 @@ describe("usage history", () => {
           {
             limit_name: "Fast models",
             rate_limit: {
-              primary_window: { used_percent: 42, limit_window_seconds: 18000, reset_at: now / 1000 },
+              primary_window: {
+                used_percent: 42,
+                limit_window_seconds: 18000,
+                reset_at: now / 1000,
+              },
             },
           },
         ],

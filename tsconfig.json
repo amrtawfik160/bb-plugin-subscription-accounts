@@ -11,7 +11,8 @@
       "@/*": ["./*"]
     },
     "noEmit": true,
-    "skipLibCheck": false
+    "skipLibCheck": false,
+    "resolveJsonModule": true
   },
   "include": [
     "server.ts",
@@ -35,6 +36,8 @@
     "history-schema.ts",
     "history.test.ts",
     "cursor-history.ts",
-    "usage-history.tsx"
+    "usage-history.tsx",
+    "pricing.ts",
+    "pricing.test.ts"
   ]
 }

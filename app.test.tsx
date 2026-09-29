@@ -69,13 +69,67 @@ const ready: AccountUsage = {
 };
 
 describe("subscription usage page", () => {
+  it("labels API estimates in summaries, chart values and model costs", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const history = aggregateHistory(
+      [
+        {
+          id: null,
+          at: now,
+          model: "gpt-6.1-sol",
+          tokens: 11100,
+          costUsd: 0.004,
+        },
+      ],
+      now,
+    );
+    history.days.at(-1)!.estimated = true;
+    history.models[0].estimated = true;
+    history.pricingAsOf = now;
+    const slot = renderSlot(
+      app.navPanels[0],
+      { subPath: "" },
+      {
+        rpc: {
+          overview: () => ({
+            ...fixture(ready),
+            history: {
+              codex: history,
+              claude: emptyHistory(),
+              grok: emptyHistory(),
+            },
+          }),
+        },
+      },
+    );
+    await slot.findByText("75% used");
+    fireEvent.click(slot.getByRole("tab", { name: "Codex" }));
+    const totals = within(slot.getByText("Today").closest("dl")!);
+    expect(totals.getAllByTitle("Estimated at current API prices")).toHaveLength(2);
+    expect(totals.getAllByText("~$0.00 · 11.1K tokens")).toHaveLength(2);
+    expect(slot.getByText(/Estimated at current API prices, including cache rates/)).toBeTruthy();
+    expect(slot.queryByText("Cost not reported")).toBeNull();
+    expect(slot.queryByText("Price unavailable")).toBeNull();
+  });
   it("shows calendar trends, honest totals, model shares, daily values and refresh", async () => {
     const app = await loadPluginApp(() => import("./app"));
     const refresh = vi.fn(async () => null);
     const history = aggregateHistory(
       [
-        { id: null, at: now, model: "test-model", tokens: 900_000, costUsd: null },
-        { id: null, at: now - 86_400_000, model: "other-model", tokens: 21_000, costUsd: 0.67 },
+        {
+          id: null,
+          at: now,
+          model: "test-model",
+          tokens: 900_000,
+          costUsd: null,
+        },
+        {
+          id: null,
+          at: now - 86_400_000,
+          model: "other-model",
+          tokens: 21_000,
+          costUsd: 0.67,
+        },
       ],
       now,
     );
@@ -86,7 +140,11 @@ describe("subscription usage page", () => {
         rpc: {
           overview: () => ({
             ...fixture(ready),
-            history: { claude: emptyHistory(), codex: history, grok: emptyHistory() },
+            history: {
+              claude: emptyHistory(),
+              codex: history,
+              grok: emptyHistory(),
+            },
           }),
           historyRefresh: refresh,
         },
@@ -97,8 +155,13 @@ describe("subscription usage page", () => {
     expect(slot.getByText(/Shared CLI records/)).toBeTruthy();
     const totals = within(slot.getByText("Yesterday").closest("dl")!);
     expect(totals.getByText("$0.67 · 21K tokens")).toBeTruthy();
-    expect(totals.getAllByText("Cost not reported")).toHaveLength(2);
-    expect(slot.getByRole("img", { name: "Daily token usage over the last 30 days" })).toBeTruthy();
+    expect(totals.getByText("Price unavailable")).toBeTruthy();
+    expect(totals.getByText("$0.67 (partial) · 921K tokens")).toBeTruthy();
+    expect(
+      slot.getByRole("img", {
+        name: "Daily token usage over the last 30 days",
+      }),
+    ).toBeTruthy();
     fireEvent.click(slot.getByRole("button", { name: "7 days" }));
     expect(slot.getByRole("img", { name: "Daily token usage over the last 7 days" })).toBeTruthy();
     fireEvent.click(slot.getByText("Daily totals"));
@@ -127,7 +190,11 @@ describe("subscription usage page", () => {
         rpc: {
           overview: () => ({
             ...fixture(ready),
-            history: { claude: emptyHistory(), codex: history, grok: emptyHistory() },
+            history: {
+              claude: emptyHistory(),
+              codex: history,
+              grok: emptyHistory(),
+            },
           }),
         },
       },
@@ -145,7 +212,15 @@ describe("subscription usage page", () => {
     const yesterday = new Date(2026, 8, 28, 12).getTime();
     const history = {
       ...aggregateHistory(
-        [{ id: null, at: yesterday, model: "model", tokens: 900, costUsd: 0.67 }],
+        [
+          {
+            id: null,
+            at: yesterday,
+            model: "model",
+            tokens: 900,
+            costUsd: 0.67,
+          },
+        ],
         yesterday,
       ),
       status: "error" as const,
@@ -159,7 +234,11 @@ describe("subscription usage page", () => {
           overview: () => ({
             ...fixture(ready),
             now: new Date(2026, 8, 29, 12).getTime(),
-            history: { claude: emptyHistory(), codex: history, grok: emptyHistory() },
+            history: {
+              claude: emptyHistory(),
+              codex: history,
+              grok: emptyHistory(),
+            },
           }),
         },
       },

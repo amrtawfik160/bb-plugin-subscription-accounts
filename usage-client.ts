@@ -2,6 +2,7 @@
 // Keep provider responses and credential-bearing errors on the server.
 import { jwtClaims, type PoolProviderId, type SwapProviderId } from "./providers.js";
 import { fetchCursorHistory } from "./cursor-history.js";
+import type { ModelPricing } from "./pricing.js";
 import { emptyHistory } from "./history.js";
 import {
   mapAntigravity,
@@ -82,7 +83,11 @@ export function createLocalUsageClient(fetcher: typeof fetch = fetch, signal?: A
 export function createUsageClient(
   fetcher: typeof fetch = fetch,
   signal?: AbortSignal,
-  googleOAuthClient: () => Promise<{ clientId: string; clientSecret: string } | null> = async () => null,
+  googleOAuthClient: () => Promise<{
+    clientId: string;
+    clientSecret: string;
+  } | null> = async () => null,
+  pricing?: () => Promise<ModelPricing>,
 ) {
   const request = createRequest(fetcher, signal);
   const bearer = (token: string): Record<string, string> => ({
@@ -237,6 +242,7 @@ export function createUsageClient(
                 fetcher,
                 `WorkosCursorSessionToken=${encodeURIComponent(historyUser)}%3A%3A${access}`,
                 signal,
+                pricing,
               )
             : {
                 ...emptyHistory("cursor"),
