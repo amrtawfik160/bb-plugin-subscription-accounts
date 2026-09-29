@@ -59,6 +59,16 @@ API prices can change estimates, and newly recorded usage can change totals;
 repeated refreshes of unchanged files and prices produce identical totals.
 History remains shared across machine logins, as labeled in BB's page.
 
+The All tab aggregates these existing histories without additional history
+fetches. Claude, Codex and Grok each contribute their machine-wide history once;
+Cursor contributes every saved account's export. Today and Yesterday use each
+source's timezone, and 30 Days includes today plus the preceding 29 calendar days.
+The cost/token donut, daily trend and daily totals use the same filtered rows.
+Unavailable sources are labeled and excluded. Partial or stale sources retain
+their available readings with warnings, including separately excluded unpriced
+tokens. Refresh all updates histories and account quotas together, retaining
+successful readings if another source fails.
+
 Regression tests cover first-pass completeness above the former 64/256 MB
 limits, stable repeated refreshes, persistent-cache restart/corruption recovery,
 archive and symlink discovery, streaming continuation, provider parser parity,

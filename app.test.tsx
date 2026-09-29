@@ -69,6 +69,60 @@ const ready: AccountUsage = {
 };
 
 describe("subscription usage page", () => {
+  it("combines usage in All, changes period and metric, and opens provider details", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const today = new Date(now).toISOString().slice(0, 10);
+    const yesterday = new Date(now - 86400000).toISOString().slice(0, 10);
+    const codex = {
+      ...emptyHistory(),
+      status: "ready",
+      timeZone: "UTC",
+      days: [
+        { date: today, tokens: 1000, events: 1, costUsd: 1, estimated: true },
+        { date: yesterday, tokens: 2000, events: 1, costUsd: 2, estimated: true },
+      ],
+    };
+    const refresh = vi.fn(() => null);
+    const slot = renderSlot(
+      app.navPanels[0],
+      { subPath: "" },
+      {
+        rpc: {
+          overview: () => ({ ...fixture(ready), history: { codex } }),
+          historyRefresh: refresh,
+          usageRefresh: refresh,
+          localUsageRefresh: refresh,
+        },
+      },
+    );
+    fireEvent.click(await slot.findByRole("tab", { name: "All" }));
+    expect(slot.getByTestId("all-usage-total").textContent).toBe("~$3.00");
+    expect(slot.getByRole("img", { name: "Cost share by provider for 30 Days" })).toBeTruthy();
+    expect(slot.getByText(/not your subscription bill/)).toBeTruthy();
+    const period = slot.getByRole("group", { name: "Usage period" });
+    fireEvent.click(within(period).getByRole("button", { name: "Today" }));
+    expect(slot.getByTestId("all-usage-total").textContent).toBe("~$1.00");
+    fireEvent.click(within(period).getByRole("button", { name: "Yesterday" }));
+    fireEvent.change(slot.getByRole("combobox", { name: "Usage metric" }), { target: { value: "tokens" } });
+    expect(slot.getByTestId("all-usage-total").textContent).toBe("2K");
+    fireEvent.click(slot.getByRole("button", { name: "Refresh all" }));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(5));
+    expect(slot.getByRole("region", { name: "Antigravity quotas" }).textContent).toContain("75% used");
+    fireEvent.click(
+      within(slot.getByRole("list", { name: "Usage by provider" })).getByRole("button", { name: /Codex/ }),
+    );
+    expect(slot.getByRole("tab", { name: "Codex" }).getAttribute("aria-selected")).toBe("true");
+  });
+  it("keeps the All chart empty when history is unavailable and supports tab keyboard navigation", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, { rpc: { overview: () => fixture(ready) } });
+    const first = await slot.findByRole("tab", { name: /Antigravity/ });
+    fireEvent.keyDown(first, { key: "Home" });
+    expect(slot.getByRole("tab", { name: "All" }).getAttribute("aria-selected")).toBe("true");
+    expect(slot.getByTestId("all-usage-total").textContent).toBe("—");
+    expect(slot.getByText("History unavailable")).toBeTruthy();
+    expect(slot.getByText(/No history could be loaded/)).toBeTruthy();
+  });
   it("shows scan completion and identifies OpenUsage's record-size warning", async () => {
     const app = await loadPluginApp(() => import("./app"));
     const history = aggregateHistory([{ id: null, at: now, model: "test", tokens: 100, costUsd: 1 }], now);

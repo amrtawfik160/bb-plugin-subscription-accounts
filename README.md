@@ -15,6 +15,12 @@ bb moves to the next one and carries on with the task.
   reset countdowns, plan names and credit balances when the provider reports
   them. Refresh an account manually or let its usage update every five minutes.
   Failed requests keep the last successful reading, labeled as last known usage.
+- **All subscriptions together.** The **All** tab combines cost, tokens and events
+  for Today, Yesterday or 30 Days. A provider donut, daily trend and exact daily
+  totals show where usage comes from. Current quotas remain per account below.
+  Refresh all sources together, or open a provider from the legend. Shared CLI
+  history is counted once per provider; Cursor exports are summed across saved
+  accounts. Missing history, partial scans and API estimates are labeled.
 - **Usage history.** Daily token trends with 7/30-day views, Today/Yesterday/30-day
   totals, and model breakdowns. Claude, Codex and Grok history comes from this
   machine's CLI records across all logins; Cursor uses each account's usage export.

@@ -15,6 +15,7 @@ import {
   type UsageHistory,
 } from "./usage-types";
 import { HistoryPanel, ProviderLinks } from "./usage-history";
+import { AllUsage } from "./all-usage-panel";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Icon } from "@/components/ui/icon";
@@ -23,7 +24,8 @@ import { cn } from "@/lib/utils";
 
 type SwapId = "antigravity" | "cursor" | "grok";
 type PoolId = "claude" | "codex";
-type TabId = SwapId | PoolId;
+type ProviderId = SwapId | PoolId;
+type TabId = ProviderId | "all";
 
 interface SwapAccount {
   name: string;
@@ -66,7 +68,7 @@ interface Login {
   error: string | null;
   account: string | null;
 }
-interface Overview {
+export interface Overview {
   now: number;
   autoSwitch: boolean;
   swap: SwapSection[];
@@ -95,6 +97,7 @@ type Run = (task: () => Promise<unknown>, done?: string) => Promise<void>;
 
 const CHANGED = "accounts-changed";
 const TABS: { id: TabId; label: string }[] = [
+  { id: "all", label: "All" },
   { id: "antigravity", label: "Antigravity" },
   { id: "claude", label: "Claude" },
   { id: "codex", label: "Codex" },
@@ -443,7 +446,7 @@ function SignIn({
   disabled,
   children,
 }: {
-  provider: TabId;
+  provider: ProviderId;
   label: string;
   login: Login | null;
   rpc: Rpc;
@@ -998,7 +1001,102 @@ function PoolTab({ provider, data, rpc, run }: { provider: PoolId; data: Overvie
 
 // ── page ──────────────────────────────────────────────────────────────────
 
+function AllQuotas({ data, onOpenProvider }: { data: Overview; onOpenProvider: (id: ProviderId) => void }) {
+  return (
+    <section aria-label="All account quotas" className="space-y-3">
+      <h2 className="text-sm font-medium">Current quotas</h2>
+      <p className="text-xs text-muted-foreground">
+        Per-account allowances and reset times. Open a provider to manage its accounts.
+      </p>
+      {TABS.filter((tab): tab is { id: ProviderId; label: string } => tab.id !== "all").map(
+        ({ id, label }) => {
+          const swap = data.swap.find((section) => section.id === id);
+          const accounts = data.pool.accounts.filter((account) => account.provider === id);
+          const local = id === "claude" || id === "codex" ? data.pool.localLogin[id] : null;
+          const usageRows = swap
+            ? swap.accounts.map((account) => ({
+                key: account.name,
+                name: account.email ?? account.name,
+                usage: account.usage,
+              }))
+            : local && !local.inStack
+              ? [{ key: "local", name: `${local.email ?? "Machine login"} · CLI login`, usage: local.usage }]
+              : [];
+          return (
+            <section
+              key={id}
+              aria-label={`${label} quotas`}
+              className="rounded-lg border border-border bg-card p-4"
+            >
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <h3 className="text-sm font-medium">{label}</h3>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="min-h-11 text-xs"
+                  onClick={() => onOpenProvider(id)}
+                >
+                  Open {label}
+                  <Icon name="ArrowUpRight" className="size-3.5" />
+                </Button>
+              </div>
+              <div className="space-y-4">
+                {usageRows.map(({ key, name, usage }) => (
+                  <div key={key} className="space-y-2">
+                    <p className="break-words text-xs text-muted-foreground">
+                      {name}
+                      {usage.plan ? ` · ${usage.plan}` : ""}
+                    </p>
+                    {usage.metrics.length ? (
+                      <div className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
+                        {usage.metrics.map((metric) => (
+                          <QuotaMeter key={metric.label} row={metric} now={data.now} />
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        {usage.status === "loading"
+                          ? "Fetching subscription usage…"
+                          : "Quota unavailable. Open this provider to check its connection."}
+                      </p>
+                    )}
+                    {usage.error ? (
+                      <p className="break-words text-xs text-destructive">
+                        {usage.error}
+                        {usage.metrics.length ? " · Last known usage" : ""}
+                      </p>
+                    ) : null}
+                  </div>
+                ))}
+                {accounts.map((account) => (
+                  <div key={account.id} className="space-y-2">
+                    <p className="break-words text-xs text-muted-foreground">
+                      {account.email ?? account.label}
+                      {account.subscriptionType ? ` · ${account.subscriptionType}` : ""} ·{" "}
+                      {POOL_STATUS[account.status].text}
+                    </p>
+                    <PoolUsage account={account} now={data.now} />
+                    {account.error ? (
+                      <p className="break-words text-xs text-destructive">{account.error}</p>
+                    ) : null}
+                  </div>
+                ))}
+                {!usageRows.length && !accounts.length ? (
+                  <p className="text-xs text-muted-foreground">
+                    No connected accounts. Open {label} to add one.
+                  </p>
+                ) : null}
+              </div>
+            </section>
+          );
+        },
+      )}
+    </section>
+  );
+}
+
 function tabSummary(id: TabId, data: Overview): { count: number; tone: "good" | "bad" | "idle" | "warn" } {
+  if (id === "all") return { count: 0, tone: "idle" };
   if (id === "claude" || id === "codex") {
     const accounts = data.pool.accounts.filter((a) => a.provider === id);
     const ready = accounts.filter((a) => a.status === "ready").length;
@@ -1100,7 +1198,40 @@ function AccountsPage() {
       </div>
 
       <div id="subscription-panel" role="tabpanel" aria-labelledby={`subscription-tab-${tab}`}>
-        {swapSection ? (
+        {tab === "all" ? (
+          <AllUsage
+            data={data}
+            onOpenProvider={setTab}
+            onRefresh={() =>
+              run(async () => {
+                const tasks = [
+                  ...(["claude", "codex", "grok"] as const).map((provider) =>
+                    rpc.call("historyRefresh", { provider }),
+                  ),
+                  ...data.swap.flatMap((section) =>
+                    section.accounts.map((account) =>
+                      rpc.call("usageRefresh", { provider: section.id, name: account.name }),
+                    ),
+                  ),
+                  ...(["claude", "codex"] as const)
+                    .filter((provider) => data.pool.localLogin[provider])
+                    .map((provider) => rpc.call("localUsageRefresh", { provider })),
+                  ...data.pool.accounts.map((account) => rpc.call("poolRefresh", { id: account.id })),
+                ];
+                const results = await Promise.allSettled(tasks);
+                const failures = results.filter((result) => result.status === "rejected");
+                if (failures.length) {
+                  refetch();
+                  throw new Error(
+                    `${failures.length} usage sources could not refresh. Open their provider tabs for details.`,
+                  );
+                }
+              })
+            }
+          >
+            <AllQuotas data={data} onOpenProvider={setTab} />
+          </AllUsage>
+        ) : swapSection ? (
           <>
             <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-card px-4 py-3">
               <Checkbox
@@ -1126,23 +1257,25 @@ function AccountsPage() {
         ) : (
           <PoolTab provider={tab as PoolId} data={data} rpc={rpc} run={run} />
         )}
-        <div className="mt-5 space-y-3">
-          {tab !== "cursor" && tab !== "antigravity" && data.history?.[tab] ? (
-            <HistoryPanel
-              key={tab}
-              history={data.history[tab]}
-              now={data.now}
-              name={TABS.find((item) => item.id === tab)!.label}
-              onRefresh={() => run(() => rpc.call("historyRefresh", { provider: tab }))}
-            />
-          ) : null}
-          {tab === "antigravity" ? (
-            <p className="text-xs text-muted-foreground">
-              Usage trend unavailable · Antigravity’s quota API does not provide daily token history.
-            </p>
-          ) : null}
-          <ProviderLinks provider={tab} />
-        </div>
+        {tab !== "all" ? (
+          <div className="mt-5 space-y-3">
+            {tab !== "cursor" && tab !== "antigravity" && data.history?.[tab] ? (
+              <HistoryPanel
+                key={tab}
+                history={data.history[tab]}
+                now={data.now}
+                name={TABS.find((item) => item.id === tab)!.label}
+                onRefresh={() => run(() => rpc.call("historyRefresh", { provider: tab }))}
+              />
+            ) : null}
+            {tab === "antigravity" ? (
+              <p className="text-xs text-muted-foreground">
+                Usage trend unavailable · Antigravity’s quota API does not provide daily token history.
+              </p>
+            ) : null}
+            <ProviderLinks provider={tab} />
+          </div>
+        ) : null}
       </div>
     </Frame>
   );
