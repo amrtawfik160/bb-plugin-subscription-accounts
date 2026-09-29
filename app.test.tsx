@@ -69,6 +69,88 @@ const ready: AccountUsage = {
 };
 
 describe("subscription usage page", () => {
+  it.each(["claude", "codex"] as const)(
+    "keeps pooled %s CLI allowances visible in All without duplicating base windows",
+    async (provider) => {
+      const app = await loadPluginApp(() => import("./app"));
+      const base = fixture(ready);
+      const usage: AccountUsage = {
+        ...ready,
+        status: "error",
+        error: "CLI quota request failed",
+        metrics: [
+          { ...ready.metrics[0], label: "5-hour window" },
+          { ...ready.metrics[0], label: "Weekly window" },
+          ...(provider === "claude"
+            ? [
+                { ...ready.metrics[0], label: "Fable · weekly" },
+                {
+                  label: "Extra usage",
+                  used: 2,
+                  limit: 20,
+                  remaining: 18,
+                  unit: "usd" as const,
+                  resetAt: null,
+                },
+              ]
+            : [
+                {
+                  label: "Credit balance",
+                  used: null,
+                  limit: null,
+                  remaining: 400,
+                  unit: "credits" as const,
+                  resetAt: null,
+                },
+              ]),
+        ],
+      };
+      const view = {
+        ...base,
+        pool: {
+          ...base.pool,
+          enabled: true,
+          accounts: [
+            {
+              id: "pool-test",
+              provider,
+              label: "Test account",
+              email: "test@example.com",
+              subscriptionType: "Pro",
+              enabled: true,
+              status: "ready",
+              fiveHourUtilization: 0.3,
+              fiveHourResetAt: now + 3600000,
+              sevenDayUtilization: 0.4,
+              sevenDayResetAt: now + 86400000,
+              heldUntil: null,
+              error: null,
+            },
+          ],
+          localLogin: {
+            ...base.pool.localLogin,
+            [provider]: { email: "test@example.com", plan: "Pro", inStack: true, usage },
+          },
+        },
+      };
+      const slot = renderSlot(app.navPanels[0], { subPath: "" }, { rpc: { overview: () => view } });
+      fireEvent.click(await slot.findByRole("tab", { name: "All" }));
+      const quotas = within(
+        slot.getByRole("region", { name: `${provider === "claude" ? "Claude" : "Codex"} quotas` }),
+      );
+      expect(quotas.getAllByText("5-hour window")).toHaveLength(1);
+      expect(quotas.getAllByText("Weekly window")).toHaveLength(1);
+      expect(quotas.getByText(/CLI quota request failed · Last known usage/)).toBeTruthy();
+      if (provider === "claude") {
+        expect(quotas.getByText("Fable · weekly")).toBeTruthy();
+        expect(quotas.getByText("Extra usage")).toBeTruthy();
+        expect(quotas.getByText("$2.00 / $20.00")).toBeTruthy();
+      } else {
+        expect(quotas.getByText("Credit balance")).toBeTruthy();
+        expect(quotas.getByText("400 credits left")).toBeTruthy();
+      }
+    },
+  );
   it("combines usage in All, changes period and metric, and opens provider details", async () => {
     const app = await loadPluginApp(() => import("./app"));
     const today = new Date(now).toISOString().slice(0, 10);
