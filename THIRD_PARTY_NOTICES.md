@@ -1,4 +1,4 @@
-# Pricing data attribution
+# Third-party attribution
 
 The bundled pricing snapshot is derived from the public LiteLLM model pricing
 catalog, models.dev, and OpenUsage’s pricing supplement and model alias rules.
@@ -6,6 +6,12 @@ Rates are factual API prices; see the source URLs in `pricing.ts`.
 
 OpenUsage supplement, aliases, history discovery, streaming reader, parsed-file cache semantics,
 Claude/Codex/Grok usage parsers and deduplication, and Cursor CSV fetching/parsing: https://github.com/robinebers/openusage
+
+Claude/Codex quota requests, OAuth refresh and retry, header fallbacks and
+duration-based window classification are TypeScript ports of OpenUsage's
+`ProviderAuthRetry.swift`, `ClaudeUsageClient.swift`, `CodexUsageClient.swift`
+and `CodexUsageMapper.swift`, reviewed at commit
+`ab3e87bbb7c3e91205d64ef5be4baadc20d09c67`.
 
 MIT License
 

@@ -144,8 +144,16 @@ The adapters were researched from [OpenUsage](https://github.com/robinebers/open
 They call each provider directly from the bb server using that account's saved
 login. Usage responses are normalized before reaching the page; tokens are
 never included. Swap-provider token refreshes are saved without replacing a
-newer CLI login. Local Claude/Codex usage reads existing access tokens; run the
-CLI to refresh an expired login, or use the pooler's managed accounts.
+newer CLI login. Claude/Codex usage follows OpenUsage's authentication retry:
+on 401/403, reload a newer CLI login or refresh once, save rotated credentials,
+then retry. Codex windows are classified by their duration, including quota
+and credit values reported in response headers. Pool quotas read both legacy
+fields and the newer `limitWindows` records; unreported windows stay hidden.
+
+Refreshing a pooled account whose OAuth refresh failed can reconnect it from
+the current CLI login. The plugin verifies the provider account identity and
+fresh quotas before replacing that saved login, preserving its label and
+switching order. A different CLI account cannot replace it.
 
 Usage is a five-minute in-memory cache, separate from switching cooldowns.
 A cooldown-free account is not proof of remaining quota. Missing metrics and

@@ -30,8 +30,8 @@ class HttpError extends UsageError {
   }
 }
 
-function createRequest(fetcher: typeof fetch, signal?: AbortSignal): Request {
-  return async (url, init) => {
+function createResponseRequest(fetcher: typeof fetch, signal?: AbortSignal) {
+  return async (url: string, init: RequestInit): Promise<Response> => {
     let response: Response;
     try {
       const timeout = AbortSignal.timeout(12_000);
@@ -43,6 +43,14 @@ function createRequest(fetcher: typeof fetch, signal?: AbortSignal): Request {
     } catch {
       throw new UsageError("Could not reach the usage service. Refresh to try again.");
     }
+    return response;
+  };
+}
+
+function createRequest(fetcher: typeof fetch, signal?: AbortSignal): Request {
+  const request = createResponseRequest(fetcher, signal);
+  return async (url, init) => {
+    const response = await request(url, init);
     if (!response.ok) throw new HttpError(response.status);
     try {
       return object(await response.json());
@@ -52,31 +60,198 @@ function createRequest(fetcher: typeof fetch, signal?: AbortSignal): Request {
   };
 }
 
-export function createLocalUsageClient(fetcher: typeof fetch = fetch, signal?: AbortSignal) {
-  const request = createRequest(fetcher, signal);
-  return async (provider: PoolProviderId, body: string): Promise<UsageData> => {
+export interface LocalCredentialStore {
+  reload?: () => Promise<string | null>;
+  save?: (updated: string, expected: string) => Promise<boolean>;
+  expectedAccountId?: string;
+}
+
+// Port of OpenUsage's ProviderAuthRetry and Claude/Codex usage clients.
+export function createLocalUsageClient(
+  fetcher: typeof fetch = fetch,
+  signal?: AbortSignal,
+) {
+  const request = createResponseRequest(fetcher, signal);
+  return async (
+    provider: PoolProviderId,
+    body: string,
+    store: LocalCredentialStore = {},
+  ): Promise<UsageData> => {
     let file: Json;
-    try {
-      file = object(JSON.parse(body));
-    } catch {
+    function parse(value: string): Json {
+      try {
+        return object(JSON.parse(value));
+      } catch {
       throw new UsageError("The machine login is invalid. Sign in again.");
     }
-    const tokens = object(provider === "claude" ? file.claudeAiOauth : file.tokens);
-    const access = textValue(provider === "claude" ? tokens.accessToken : tokens.access_token);
-    if (!access)
+    }
+    file = parse(body);
+    const credentials = () =>
+      object(provider === "claude" ? file.claudeAiOauth : file.tokens);
+    const accessToken = () =>
+      textValue(
+        credentials()[provider === "claude" ? "accessToken" : "access_token"],
+      );
+    async function attempt(): Promise<Response> {
+      const access = accessToken();
+      if (!access)
       throw new UsageError("No access token for the machine login. Run the CLI to refresh its login.");
-    const headers: Record<string, string> = {
+      const headers: Record<string, string> = {
       Authorization: `Bearer ${access}`,
       Accept: "application/json",
     };
-    if (provider === "claude") {
-      headers["anthropic-beta"] = "oauth-2025-04-20";
-      return mapClaude(await request("https://api.anthropic.com/api/oauth/usage", { headers }));
+      if (provider === "claude") {
+        headers["anthropic-beta"] = "oauth-2025-04-20";
+        headers["Content-Type"] = "application/json";
+        headers["User-Agent"] = "claude-cli/2.1.280 (external, cli)";
+      } else {
+        headers["User-Agent"] = "OpenUsage";
+        const tokens = credentials();
+        const claims = object(jwtClaims(tokens.id_token ?? access)?.["https://api.openai.com/auth"]);
+        const account = textValue(tokens.account_id ?? claims.chatgpt_account_id);
+        if (account) headers["ChatGPT-Account-Id"] = account;
+      }
+      return request(
+        provider === "claude"
+          ? "https://api.anthropic.com/api/oauth/usage?cedar_ember=1"
+          : "https://chatgpt.com/backend-api/wham/usage",
+        { headers },
+      );
     }
-    const claims = object(jwtClaims(tokens.id_token ?? access)?.["https://api.openai.com/auth"]);
-    const account = textValue(tokens.account_id ?? claims.chatgpt_account_id);
-    if (account) headers["ChatGPT-Account-Id"] = account;
-    return mapCodex(await request("https://chatgpt.com/backend-api/wham/usage", { headers }));
+    async function refresh(): Promise<void> {
+      const token = textValue(
+        credentials()[provider === "claude" ? "refreshToken" : "refresh_token"],
+      );
+      if (!token)
+        throw new UsageError(
+          "The machine login cannot refresh. Sign in again.",
+        );
+      // Refresh tokens rotate: never consume one without a way to persist its replacement.
+      if (!store.save)
+        throw new UsageError(
+          "Run the CLI to refresh its login, then refresh usage.",
+        );
+      const claude = provider === "claude";
+      const payload = claude
+        ? JSON.stringify({
+            grant_type: "refresh_token",
+            refresh_token: token,
+            client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+            scope:
+              "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload",
+          })
+        : new URLSearchParams({
+            grant_type: "refresh_token",
+            client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
+            refresh_token: token,
+          }).toString();
+      const response = await request(
+        claude
+          ? "https://platform.claude.com/v1/oauth/token"
+          : "https://auth.openai.com/oauth/token",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": claude
+              ? "application/json"
+              : "application/x-www-form-urlencoded",
+          },
+          body: payload,
+        },
+      );
+      const result = object(await response.json().catch(() => null));
+      if (!response.ok) {
+        const code = textValue(
+          object(result.error).code ?? result.error ?? result.code,
+        );
+        const expired = [
+          "invalid_grant",
+          "refresh_token_expired",
+          "refresh_token_reused",
+          "refresh_token_invalidated",
+        ].includes(code ?? "");
+        throw new UsageError(
+          expired
+            ? "The CLI session expired or its refresh token was replaced. Sign in again."
+            : `OAuth refresh failed (HTTP ${response.status}). Refresh to try again.`,
+        );
+      }
+      const access = textValue(result.access_token);
+      if (!access)
+        throw new UsageError(
+          "The provider returned no refreshed access token. Sign in again.",
+        );
+      const tokens = credentials();
+      tokens[claude ? "accessToken" : "access_token"] = access;
+      if (textValue(result.refresh_token))
+        tokens[claude ? "refreshToken" : "refresh_token"] =
+          result.refresh_token;
+      if (textValue(result.id_token)) tokens.id_token = result.id_token;
+      const expires = number(result.expires_in);
+      if (claude && expires !== null)
+        tokens.expiresAt = Date.now() + expires * 1000;
+      if (!claude) file.last_refresh = new Date().toISOString();
+      if (!(await store.save(JSON.stringify(file), body)))
+        throw new UsageError(
+          "The CLI login changed during refresh. Refresh again.",
+        );
+    }
+    let response = await attempt();
+    if (response.status === 401 || response.status === 403) {
+      await response.body?.cancel();
+      const current = await store.reload?.();
+      if (current && current !== body) {
+        body = current;
+        file = parse(current);
+      } else await refresh();
+      response = await attempt();
+    }
+    if (!response.ok) throw new HttpError(response.status);
+    if (store.expectedAccountId) {
+      if (provider === "claude") {
+        const profile = await request(
+          "https://api.anthropic.com/api/oauth/profile",
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken()}`,
+              Accept: "application/json",
+              "anthropic-beta": "oauth-2025-04-20",
+            },
+          },
+        );
+        if (!profile.ok) throw new HttpError(profile.status);
+        const identity = object(await profile.json().catch(() => null));
+        if (
+          textValue(object(identity.account).uuid) !== store.expectedAccountId
+        )
+          throw new UsageError(
+            "The CLI login belongs to another account. Sign in to the saved account again.",
+          );
+      } else {
+        const tokens = credentials();
+        const claims = object(
+          jwtClaims(tokens.id_token ?? accessToken())?.[
+            "https://api.openai.com/auth"
+          ],
+        );
+        if (
+          textValue(tokens.account_id ?? claims.chatgpt_account_id) !==
+          store.expectedAccountId
+        )
+          throw new UsageError(
+            "The CLI login belongs to another account. Sign in to the saved account again.",
+          );
+      }
+    }
+    let result: Json;
+    try {
+      result = object(await response.json());
+    } catch {
+      throw new UsageError("The usage service returned an invalid response. Refresh to try again.");
+    }
+    return provider === "claude"
+      ? mapClaude(result)
+      : mapCodex(result, Date.now(), response.headers);
   };
 }
 

@@ -7,6 +7,13 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 
 import type { PoolProviderId } from "./providers.js";
+import {
+  metric,
+  number,
+  object,
+  textValue,
+  type UsageMetric,
+} from "./usage.js";
 
 export const POOLER_ID = "account-pool";
 
@@ -28,10 +35,89 @@ const accountSchema = z
     heldUntil: z.number().nullable().optional(),
     error: z.string().nullable().optional(),
     lastUsedAt: z.number().nullable().optional(),
+    accountUuid: z.string().nullable().optional(),
+    codexAccountId: z.string().nullable().optional(),
+    observedAt: z.number().nullable().optional(),
   })
   .passthrough();
 
 export type PoolAccount = z.infer<typeof accountSchema>;
+
+export function poolQuotaMetrics(
+  account: Record<string, unknown>,
+): UsageMetric[] {
+    const windows = Array.isArray(account.limitWindows) ? account.limitWindows
+    : [];
+  const rows: UsageMetric[] = [];
+    if (windows.length) {
+    for (const raw of windows) {
+      const window = object(raw),
+        minutes = number(window.windowMinutes),
+        used = number(window.utilization);
+      const label =
+        minutes === 300
+          ? "5-hour window"
+          : minutes === 10080
+            ? "Weekly window"
+            : minutes === 1440
+              ? "Daily window"
+              : minutes
+                ? `${minutes / 60}-hour window`
+                : window.slot === "secondary"
+                  ? "Weekly window"
+                  : "5-hour window";
+      const row = metric(
+        label,
+        used === null ? null : used * 100,
+        100,
+        "percent",
+        number(window.resetAt),
+      );
+      if (row && !rows.some((r) => r.label === label))
+        rows.push({
+          ...row,
+          windowMs:
+            (minutes ?? (label === "Weekly window" ? 10080 : 300)) * 60000,
+        });
+    }
+  } else {
+    for (const [label, key, reset, seconds] of [
+      ["5-hour window", "fiveHourUtilization", "fiveHourResetAt", 18000],
+      ["Weekly window", "sevenDayUtilization", "sevenDayResetAt", 604800],
+    ] as const) {
+      const used = number(account[key]);
+      const row = metric(
+        label,
+        used === null ? null : used * 100,
+        100,
+        "percent",
+        number(account[reset]),
+      );
+      if (row) rows.push({ ...row, windowMs: seconds * 1000 });
+    }
+  }
+  for (const [name, raw] of Object.entries(object(account.familyWeekly))) {
+    const family = object(raw),
+      used = number(family.utilization);
+    const row = metric(
+      `${name.charAt(0).toUpperCase() }${name.slice(1) } · weekly`,
+      used === null ? null : used * 100,
+      100,
+      "percent",
+      number(family.resetAt),
+    );
+    if (row) rows.push({ ...row, windowMs: 604800000 });
+  }
+  return rows;
+}
+
+export function poolAccountIdentity(account: PoolAccount): string | null {
+  return textValue(
+    account.provider === "claude"
+      ? account.accountUuid
+      : account.codexAccountId,
+  );
+}
 
 const statusSchema = z
   .object({ routing: z.object({ claude: z.boolean(), codex: z.boolean() }) })
@@ -85,8 +171,18 @@ export function pooler(bb: BbPluginApi) {
   return {
     view,
     enable: () => bb.sdk.plugins.enable({ pluginId: POOLER_ID }),
-    importLocal: (provider: PoolProviderId, priority: number) =>
-      call("account.add", { provider, source: { kind: "import" }, label: null, priority }, accountSchema),
+    importLocal: (
+      provider: PoolProviderId,
+      priority: number,
+      label: string | null = null,
+    ) =>
+      call(
+        "account.add",
+        { provider, source: { kind: "import" }, label, priority },
+        accountSchema.extend({
+          status: accountSchema.shape.status.default("ready"),
+        }),
+      ),
     remove: (id: string) => call("account.remove", { id }, z.object({ removed: z.boolean() })),
     setEnabled: (id: string, enabled: boolean) =>
       call(enabled ? "account.enable" : "account.disable", { id }, z.unknown()),

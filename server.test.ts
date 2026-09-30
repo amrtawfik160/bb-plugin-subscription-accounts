@@ -24,7 +24,7 @@ afterEach(async () => {
   if (home) await fs.rm(home, { recursive: true, force: true });
 });
 
-async function setup() {
+async function setup(plugins = { list: async () => [] } as any) {
   home = await fs.mkdtemp(path.join(os.tmpdir(), "subscription-usage-test-"));
   vi.spyOn(os, "homedir").mockReturnValue(home);
   const file = path.join(home, ".grok/auth.json");
@@ -32,7 +32,7 @@ async function setup() {
   await fs.writeFile(file, savedLogin, { mode: 0o600 });
   const { bb, harness } = createFakePluginHost({
     pluginId: "subscription-accounts",
-    sdk: { plugins: { list: async () => [] } },
+    sdk: { plugins },
   });
   dispose = () => harness.lifecycle.dispose();
   await plugin(bb);
@@ -41,6 +41,144 @@ async function setup() {
 }
 
 describe("subscription usage RPC", () => {
+  it("reconnects stale pooled Claude credentials only after verifying the live account, preserving order", async () => {
+    const old = {
+      id: "old",
+      provider: "claude",
+      kind: "oauth",
+      label: "Saved",
+      email: "test@example.com",
+      accountUuid: "account-uuid",
+      enabled: true,
+      priority: 5,
+      status: "error",
+      error: "OAuth refresh failed with HTTP 400.",
+    };
+    const accounts: any[] = [old];
+    const calls: string[] = [];
+    const callRpc = vi.fn(async ({ method, input, outputSchema }: any) => {
+      calls.push(method);
+      let result: any = null;
+      if (method === "account.list") result = accounts;
+      if (method === "status.get")
+        result = { routing: { claude: true, codex: false } };
+      if (method === "account.add") {
+        const fresh = {
+          ...old,
+          id: "new",
+          label: input.label,
+          priority: input.priority,
+          status: "ready",
+          error: null,
+          fiveHourUtilization: 0,
+          sevenDayUtilization: 0.95,
+        };
+        accounts.push(fresh);
+        const { status, ...metadata } = fresh;
+        result = metadata;
+      }
+      if (method === "account.remove") {
+        accounts.splice(
+          accounts.findIndex((a) => a.id === input.id),
+          1,
+        );
+        result = { removed: true };
+      }
+      return outputSchema.parse(result);
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) =>
+        Response.json(
+          url.includes("/profile")
+            ? { account: { uuid: "account-uuid" } }
+            : url.includes("/usage")
+              ? {
+                  five_hour: { utilization: 0 },
+                  seven_day: { utilization: 95 },
+                }
+              : {},
+        ),
+      ),
+    );
+    const { harness } = await setup({
+      list: async () => [{ id: "account-pool", enabled: true }],
+      callRpc,
+    });
+    await fs.mkdir(path.join(home!, ".claude"));
+    await fs.writeFile(
+      path.join(home!, ".claude/.credentials.json"),
+      JSON.stringify({
+        claudeAiOauth: {
+          accessToken: "live-access",
+          refreshToken: "live-refresh",
+        },
+      }),
+    );
+    await harness.behavior.callRpc("poolRefresh", { id: "old" });
+    expect(accounts).toMatchObject([
+      { id: "new", priority: 5, label: "Saved", status: "ready" },
+    ]);
+    expect(calls.indexOf("account.reorder")).toBeLessThan(
+      calls.indexOf("account.remove"),
+    );
+    expect(
+      callRpc.mock.calls.find(([c]) => c.method === "account.reorder")?.[0]
+        .input.accountIds,
+    ).toEqual(["new", "old"]);
+  });
+
+  it("does not replace a pool account with another CLI account", async () => {
+    const add = vi.fn();
+    const account = {
+      id: "old",
+      provider: "claude",
+      kind: "oauth",
+      label: "Saved",
+      email: "test@example.com",
+      accountUuid: "expected",
+      enabled: true,
+      priority: 5,
+      status: "error",
+      error: "OAuth refresh failed with HTTP 400.",
+    };
+    const callRpc = async ({ method }: any) =>
+      method === "account.list"
+        ? [account]
+        : method === "status.get"
+          ? { routing: { claude: true, codex: false } }
+          : method === "account.add"
+            ? add()
+            : null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) =>
+        Response.json(
+          url.includes("/profile")
+            ? { account: { uuid: "other" } }
+            : { five_hour: { utilization: 0 } },
+        ),
+      ),
+    );
+    const { harness } = await setup({
+      list: async () => [{ id: "account-pool", enabled: true }],
+      callRpc,
+    });
+    await fs.mkdir(path.join(home!, ".claude"));
+    await fs.writeFile(
+      path.join(home!, ".claude/.credentials.json"),
+      JSON.stringify({
+        claudeAiOauth: {
+          accessToken: "live-access",
+          refreshToken: "live-refresh",
+        },
+      }),
+    );
+    await expect(
+      harness.behavior.callRpc("poolRefresh", { id: "old" }),
+    ).rejects.toThrow("another account");
+    expect(add).not.toHaveBeenCalled();
+  });
   it("exposes local history through validated RPC without conversation or credential data", async () => {
     vi.stubGlobal(
       "fetch",

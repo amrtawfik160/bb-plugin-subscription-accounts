@@ -57,6 +57,7 @@ interface PoolAccount {
   sevenDayResetAt: number | null;
   heldUntil: number | null;
   error: string | null;
+  quotaMetrics?: UsageMetric[];
 }
 interface Login {
   provider: string;
@@ -754,6 +755,19 @@ function SwapTab({ section, data, rpc, run }: { section: SwapSection; data: Over
 // ── Claude / Codex through the Account Pooler ─────────────────────────────
 
 function PoolUsage({ account, now }: { account: PoolAccount; now: number }) {
+  if (account.quotaMetrics) {
+    return account.quotaMetrics.length ? (
+      <div className="grid grid-cols-1 gap-x-6 gap-y-4 pt-2 sm:grid-cols-2">
+        {account.quotaMetrics.map((row) => (
+          <QuotaMeter key={row.label} row={row} now={now} />
+        ))}
+      </div>
+    ) : (
+      <p className="text-xs text-muted-foreground">
+        Quota unavailable. Refresh to check.
+      </p>
+    );
+  }
   const windows = [
     {
       label: "5-hour window",

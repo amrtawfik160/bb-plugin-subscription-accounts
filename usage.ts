@@ -338,49 +338,73 @@ export function mapClaude(value: unknown): UsageData {
   return { plan: null, metrics };
 }
 
-export function mapCodex(value: unknown, now = Date.now()): UsageData {
+export function mapCodex(
+  value: unknown,
+  now = Date.now(),
+  headers = new Headers(),
+): UsageData {
   const root = object(value),
     rate = object(root.rate_limit);
   const metrics: UsageMetric[] = [];
-  for (const [key, fallbackLabel] of [
-    ["primary_window", "5-hour window"],
-    ["secondary_window", "Weekly window"],
-  ]) {
-    const window = object(rate[key]);
-    const duration = number(window.limit_window_seconds);
-    const label =
-      duration === 604800 ? "Weekly window" : duration === 18000 ? "5-hour window" : fallbackLabel;
-    const after = number(window.reset_after_seconds);
-    const reset = timestamp(window.reset_at) ?? (after === null ? null : now + after * 1000);
-    const row = metric(label, number(window.used_percent), 100, "percent", reset);
-    if (row && !metrics.some((m) => m.label === label))
-      metrics.push({ ...row, ...(duration !== null && duration > 0 ? { windowMs: duration * 1000 } : {}) });
+  // OpenUsage's classifiedWindowLines: explicit periods take priority over slot fallbacks.
+  function windows(
+    rate: Record<string, unknown>,
+    labels: [string, string],
+    useHeaders = false,
+  ) {
+    const candidates = ["primary", "secondary"].flatMap((slot, index) => {
+      const raw = rate[`${slot}_window`];
+      const headerUsed = useHeaders
+        ? number(headers.get(`x-codex-${slot}-used-percent`))
+        : null;
+      if (!raw && headerUsed === null) return [];
+      const window = object(raw);
+      const duration = number(window.limit_window_seconds);
+      return [
+        {
+          window,
+          duration,
+          used: number(window.used_percent) ?? headerUsed,
+          fallback: index,
+        },
+      ];
+    });
+    return [18000, 604800].flatMap((seconds, index) => {
+      const candidate =
+        candidates.find((c) => c.duration === seconds) ??
+        candidates.find(
+          (c) =>
+            ![18000, 604800].includes(c.duration ?? 0) && c.fallback === index,
+        );
+      if (!candidate) return [];
+      const after = number(candidate.window.reset_after_seconds);
+      const row = metric(
+        labels[index],
+        candidate.used,
+        100,
+        "percent",
+        timestamp(candidate.window.reset_at) ??
+          (after === null ? null : now + after * 1000),
+      );
+      return row
+        ? [{ ...row, windowMs: (candidate.duration ?? seconds) * 1000 }]
+        : [];
+    });
   }
+  metrics.push(...windows(rate, ["5-hour window", "Weekly window"], true));
   for (const extra of Array.isArray(root.additional_rate_limits) ? root.additional_rate_limits : []) {
     const item = object(extra),
       extraRate = object(item.rate_limit);
     const name = textValue(item.limit_name ?? item.metered_feature);
     if (!name) continue;
-    for (const [key, period] of [
-      ["primary_window", "session"],
-      ["secondary_window", "weekly"],
-    ]) {
-      const w = object(extraRate[key]),
-        seconds = number(w.limit_window_seconds),
-        after = number(w.reset_after_seconds);
-      const row = metric(
-        `${name} · ${seconds === 604800 ? "weekly" : period}`,
-        number(w.used_percent),
-        100,
-        "percent",
-        timestamp(w.reset_at) ?? (after === null ? null : now + after * 1000),
-      );
-      if (row)
-        metrics.push({ ...row, ...(seconds !== null && seconds > 0 ? { windowMs: seconds * 1000 } : {}) });
-    }
+    metrics.push(
+      ...windows(extraRate, [`${name} · session`, `${name} · weekly`]),
+    );
   }
   const credits = object(root.credits);
-  const balance = number(credits.balance) ?? (credits.has_credits === false ? 0 : null);
+  const balance =
+    number(credits.balance) ?? (credits.has_credits === false ? 0 : null) ??
+    number(headers.get("x-codex-credits-balance"));
   if (balance !== null) metrics.push(metric("Credit balance", null, null, "credits", null, balance)!);
   return { plan: textValue(root.plan_type), metrics };
 }
