@@ -29,10 +29,12 @@ export function AllUsage({
   const [period, setPeriod] = useState<UsagePeriod>("30days");
   const [metric, setMetric] = useState<"cost" | "tokens">("cost");
   const [pending, setPending] = useState(false);
-  const providers = aggregateProviders(data, period, data.now);
+  const value = (row: ReturnType<typeof sumUsage>) => (metric === "cost" ? (row.costUsd ?? 0) : row.tokens);
+  const providers = aggregateProviders(data, period, data.now).sort(
+    (a, b) => Number(b.available) - Number(a.available) || value(b.total) - value(a.total),
+  );
   const available = providers.filter((provider) => provider.available);
   const total = sumUsage(available.map((provider) => provider.total));
-  const value = (row: typeof total) => (metric === "cost" ? (row.costUsd ?? 0) : row.tokens);
   const costAmount = (row: typeof total) =>
     row.costUsd === null ? "Price unavailable" : `${row.estimated ? "~" : ""}${dollars(row.costUsd)}`;
   const amount = (row: typeof total) =>
@@ -125,61 +127,70 @@ export function AllUsage({
           ))}
         </div>
         <div className="flex flex-col items-center gap-5 py-2 sm:flex-row sm:gap-8">
-          <div className="relative size-52 shrink-0">
-            <svg
-              role="img"
-              aria-label={`${metric === "cost" ? "Cost" : "Token"} share by provider for ${PERIODS.find((p) => p.id === period)!.label}`}
-              viewBox="0 0 200 200"
-              className="size-full"
-            >
-              <title>
-                {chartTotal > 0
-                  ? slices
-                      .map(
-                        (slice) =>
-                          `${slice.label}: ${amount(slice.total)} (${(slice.fraction * 100).toFixed(1)}%)`,
-                      )
-                      .join("; ")
-                  : loading
-                    ? "Reading usage history"
-                    : "No chartable usage in this period"}
-              </title>
-              <circle cx="100" cy="100" r="80" fill="none" stroke="var(--muted)" strokeWidth="34" />
-              {slices.map((slice) => (
-                <circle
-                  key={slice.id}
-                  cx="100"
-                  cy="100"
-                  r="80"
-                  pathLength="1"
-                  fill="none"
-                  stroke={slice.color}
-                  strokeWidth="34"
-                  strokeDasharray={`${slice.fraction} ${1 - slice.fraction}`}
-                  strokeDashoffset={-slice.offset}
-                  transform="rotate(-90 100 100)"
+          <div className="w-52 shrink-0 text-center">
+            <div className="relative size-52">
+              <svg
+                role="img"
+                aria-label={`${metric === "cost" ? "Cost" : "Token"} share by provider for ${PERIODS.find((p) => p.id === period)!.label}`}
+                viewBox="0 0 200 200"
+                className="size-full"
+              >
+                <title>
+                  {chartTotal > 0
+                    ? slices
+                        .map(
+                          (slice) =>
+                            `${slice.label}: ${amount(slice.total)} (${(slice.fraction * 100).toFixed(1)}%)`,
+                        )
+                        .join("; ")
+                    : loading
+                      ? "Reading usage history"
+                      : "No chartable usage in this period"}
+                </title>
+                <circle cx="100" cy="100" r="80" fill="none" stroke="var(--muted)" strokeWidth="28" />
+                {slices.map((slice) => {
+                  const gap = slices.length > 1 ? Math.min(0.8, (slice.fraction * 100) / 3) : 0;
+                  const length = slice.fraction * 100 - gap;
+                  return (
+                    <circle
+                      key={slice.id}
+                      cx="100"
+                      cy="100"
+                      r="80"
+                      pathLength="100"
+                      fill="none"
+                      stroke={slice.color}
+                      strokeWidth="28"
+                      strokeDasharray={`${length} ${100 - length}`}
+                      strokeDashoffset={-(slice.offset * 100 + gap / 2)}
+                      transform="rotate(-90 100 100)"
+                    >
+                      <title>{`${slice.label}: ${amount(slice.total)} · ${(slice.fraction * 100).toFixed(1)}%`}</title>
+                    </circle>
+                  );
+                })}
+              </svg>
+              <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center">
+                <span
+                  className="max-w-[60%] text-2xl font-semibold tabular-nums"
+                  data-testid="all-usage-total"
                 >
-                  <title>{`${slice.label}: ${amount(slice.total)} · ${(slice.fraction * 100).toFixed(1)}%`}</title>
-                </circle>
-              ))}
-            </svg>
-            <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center px-10 text-center">
-              <span className="text-2xl font-semibold tabular-nums" data-testid="all-usage-total">
-                {available.length ? centerAmount : "—"}
-              </span>
-              <span className="mt-1 text-xs text-muted-foreground">
-                {available.length
-                  ? metric === "cost"
-                    ? "dollars"
-                    : "tokens"
-                  : loading
-                    ? "Loading history…"
-                    : "History unavailable"}
-              </span>
-              {incomplete && available.length ? (
-                <span className="mt-1 text-xs text-muted-foreground">Available history</span>
-              ) : null}
+                  {available.length ? centerAmount : "—"}
+                </span>
+                <span className="mt-1 text-xs text-muted-foreground">
+                  {available.length
+                    ? metric === "cost"
+                      ? "dollars"
+                      : "tokens"
+                    : loading
+                      ? "Loading history…"
+                      : "History unavailable"}
+                </span>
+              </div>
             </div>
+            {incomplete && available.length ? (
+              <p className="mt-2 text-xs text-muted-foreground">Available history</p>
+            ) : null}
           </div>
           <ul aria-label="Usage by provider" className="w-full min-w-0 flex-1 space-y-1">
             {providers.map((provider) => (
@@ -206,8 +217,15 @@ export function AllUsage({
                             : "History unavailable · Open to retry"}
                     </span>
                   </span>
-                  <span className="shrink-0 text-sm tabular-nums">
-                    {provider.available ? amount(provider.total) : "—"}
+                  <span className="shrink-0 text-right text-sm tabular-nums">
+                    <span className="block">{provider.available ? amount(provider.total) : "—"}</span>
+                    {provider.available &&
+                    chartTotal > 0 &&
+                    (metric === "tokens" || provider.total.costUsd !== null) ? (
+                      <span className="mt-0.5 block text-xs text-muted-foreground">
+                        {((value(provider.total) / chartTotal) * 100).toFixed(1)}%
+                      </span>
+                    ) : null}
                   </span>
                 </button>
               </li>

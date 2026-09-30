@@ -250,6 +250,64 @@ describe("subscription usage page", () => {
     );
     expect(slot.getByRole("tab", { name: "Codex" }).getAttribute("aria-selected")).toBe("true");
   });
+  it("ranks providers and donut slices by the selected total, including unpriced tokens", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const view = fixture(ready);
+    const slot = renderSlot(
+      app.navPanels[0],
+      { subPath: "" },
+      {
+        rpc: {
+          overview: () => ({
+            ...view,
+            history: {
+              claude: aggregateHistory([{ id: "a", model: "test", at: now, tokens: 2000, costUsd: 8 }], now),
+              codex: aggregateHistory([{ id: "b", model: "test", at: now, tokens: 3000, costUsd: 2 }], now),
+              grok: aggregateHistory(
+                [
+                  {
+                    id: "c",
+                    model: "test",
+                    at: now,
+                    tokens: 4000,
+                    costUsd: null,
+                  },
+                ],
+                now,
+              ),
+            },
+          }),
+        },
+      },
+    );
+    fireEvent.click(await slot.findByRole("tab", { name: "All" }));
+    const legend = within(slot.getByRole("list", { name: "Usage by provider" }));
+    const order = () =>
+      legend
+        .getAllByRole("button")
+        .map((button) => button.textContent!.match(/Claude|Codex|Grok|Cursor|Antigravity/)![0]);
+    expect(order()).toEqual(["Claude", "Codex", "Grok", "Cursor", "Antigravity"]);
+    expect(legend.getByText("80.0%")).toBeTruthy();
+    expect(legend.getByText("20.0%")).toBeTruthy();
+    const chart = slot.getByRole("img", {
+      name: "Cost share by provider for 30 Days",
+    });
+    const slices = () => Array.from(chart.querySelectorAll("circle[stroke-dasharray]"));
+    expect(slices().map((slice) => slice.textContent?.split(":")[0])).toEqual(["Claude", "Codex"]);
+    for (const [i, slice] of slices().entries()) {
+      const [arc, gap] = slice.getAttribute("stroke-dasharray")!.split(" ").map(Number);
+      expect(arc).toBeCloseTo(i === 0 ? 79.2 : 19.2);
+      expect(arc + gap).toBeCloseTo(100);
+    }
+    expect(chart.parentElement?.contains(slot.getByText("Available history"))).toBe(false);
+    fireEvent.change(slot.getByRole("combobox", { name: "Usage metric" }), {
+      target: { value: "tokens" },
+    });
+    expect(order()).toEqual(["Grok", "Codex", "Claude", "Cursor", "Antigravity"]);
+    expect(slices().map((slice) => slice.textContent?.split(":")[0])).toEqual(["Grok", "Codex", "Claude"]);
+    expect(legend.getByText("44.4%")).toBeTruthy();
+    expect(slot.getByTestId("all-usage-total").textContent).toBe("9K");
+  });
   it("keeps the All chart empty when history is unavailable and supports tab keyboard navigation", async () => {
     const app = await loadPluginApp(() => import("./app"));
     const slot = renderSlot(app.navPanels[0], { subPath: "" }, { rpc: { overview: () => fixture(ready) } });
