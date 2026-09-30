@@ -31,8 +31,18 @@ import {
   parseResetMs,
   validateName,
 } from "./pool.js";
-import { type PoolAccount, pooler } from "./pooler.js";
-import { UsageCache, usageSchema, UsageError } from "./usage.js";
+import {
+  type PoolAccount,
+  pooler,
+  poolQuotaMetrics,
+  poolAccountIdentity,
+} from "./pooler.js";
+import {
+  UsageCache,
+  usageSchema,
+  usageMetricSchema,
+  UsageError,
+} from "./usage.js";
 import { createLocalUsageClient, createUsageClient } from "./usage-client.js";
 import { HistoryCache } from "./history.js";
 import { sqliteHistoryStore } from "./history-store.js";
@@ -100,6 +110,7 @@ const poolAccountSchema = z.object({
   sevenDayResetAt: z.number().nullable(),
   heldUntil: z.number().nullable(),
   error: z.string().nullable(),
+  quotaMetrics: z.array(usageMetricSchema),
 });
 
 const localLoginSchema = z.object({
@@ -816,7 +827,9 @@ export default async function plugin(bb: BbPluginApi) {
     );
   }
 
-  function toPoolAccount(account: PoolAccount): z.infer<typeof poolAccountSchema> {
+  function toPoolAccount(
+    account: PoolAccount,
+  ): z.infer<typeof poolAccountSchema> {
     return {
       id: account.id,
       provider: account.provider,
@@ -831,11 +844,97 @@ export default async function plugin(bb: BbPluginApi) {
       sevenDayResetAt: account.sevenDayResetAt ?? null,
       heldUntil: account.heldUntil ?? null,
       error: account.error ?? null,
+      quotaMetrics: poolQuotaMetrics(account),
     };
   }
 
   async function readOptional(file: string): Promise<string | null> {
     return fs.readFile(file, "utf8").catch(() => null);
+  }
+
+  const localCredentialPath = (provider: PoolProviderId) =>
+    path.join(os.homedir(), provider === "claude" ? ".claude/.credentials.json" : ".codex/auth.json");
+  function localCredentialStore(
+    provider: PoolProviderId,
+    expectedAccountId?: string,
+  ) {
+    const target = localCredentialPath(provider);
+    return {
+      expectedAccountId,
+      reload: () => readOptional(target),
+      save: (updated: string, expected: string) =>
+        serialized(async () => {
+          if ((await readOptional(target)) !== expected) return false;
+          const temp = `${target}.${process.pid}.usage-refresh`;
+          try {
+            await fs.writeFile(temp, updated, { mode: 0o600 });
+            if ((await readOptional(target)) !== expected) return false;
+            await fs.rename(temp, target);
+            return true;
+          } finally {
+            await fs.rm(temp, { force: true });
+          }
+        }),
+    };
+  }
+
+  const reconnecting = new Map<string, Promise<void>>();
+  async function reconnectPoolAccount(account: PoolAccount) {
+    const pending = reconnecting.get(account.id);
+    if (pending) return pending;
+    const task = performReconnect(account);
+    reconnecting.set(account.id, task);
+    try {
+      await task;
+    } finally {
+      reconnecting.delete(account.id);
+    }
+  }
+  async function performReconnect(account: PoolAccount) {
+    const identity = poolAccountIdentity(account);
+    if (!identity)
+      throw new UsageError(
+        "This saved account has no verified identity. Sign in again.",
+      );
+    const body = await readOptional(localCredentialPath(account.provider));
+    if (!body)
+      throw new UsageError(
+        "Sign in to this account with its CLI, then refresh again.",
+      );
+    await fetchLocalUsage(
+      account.provider,
+      body,
+      localCredentialStore(account.provider, identity),
+    );
+    const replacement = await pool.importLocal(
+      account.provider,
+      account.priority,
+      account.label,
+    );
+    if (poolAccountIdentity(replacement) !== identity) {
+      await pool.remove(replacement.id);
+      throw new UsageError(
+        "The CLI login changed during reconnect. Refresh again.",
+      );
+    }
+    const current = await pool.view();
+    const fresh = current.accounts.find((a) => a.id === replacement.id);
+    if (!fresh || fresh.error || !poolQuotaMetrics(fresh).length) {
+      await pool.remove(replacement.id);
+      throw new UsageError(
+        "The replacement login could not fetch quotas. The saved account was kept.",
+      );
+    }
+    const order = current.accounts
+      .filter((a) => a.provider === account.provider && a.id !== replacement.id)
+      .map((a) => (a.id === account.id ? replacement.id : a.id));
+    try {
+      await pool.reorder(account.provider, [...order, account.id]);
+    } catch (error) {
+      await pool.remove(replacement.id);
+      throw error;
+    }
+    await pool.remove(account.id);
   }
 
   function localUsageKey(provider: PoolProviderId, body: string | null): string | null {
@@ -853,13 +952,19 @@ export default async function plugin(bb: BbPluginApi) {
       readOptional(path.join(home, ".claude.json")),
       readOptional(path.join(home, ".codex", "auth.json")),
     ]);
-    const mark = (provider: PoolProviderId, local: LocalLogin | null, body: string | null) => {
+    const mark = (
+      provider: PoolProviderId,
+      local: LocalLogin | null,
+      body: string | null,
+    ) => {
       if (!local || !body) {
         localUsageKey(provider, null);
         return null;
       }
       const key = localUsageKey(provider, body)!;
-      void usage.refresh(key, () => fetchLocalUsage(provider, body));
+      void usage.refresh(key, () =>
+        fetchLocalUsage(provider, body, localCredentialStore(provider)),
+      );
       return {
         ...local,
         inStack: accounts.some(
@@ -1021,6 +1126,14 @@ export default async function plugin(bb: BbPluginApi) {
     },
     poolRefresh: async ({ id }) => {
       await pool.refresh(id);
+      const account = (await pool.view()).accounts.find((a) => a.id === id);
+      if (
+        account?.enabled &&
+        account.error &&
+        /OAuth refresh failed with HTTP (400|401)\b/.test(account.error)
+      ) {
+        await reconnectPoolAccount(account);
+      }
       changed();
       return null;
     },
@@ -1037,7 +1150,11 @@ export default async function plugin(bb: BbPluginApi) {
       const local = provider === "claude" ? readClaudeLocal(body, null) : readCodexLocal(body);
       const key = localUsageKey(provider, local ? body : null);
       if (!local || !key || !body) throw new Error("This machine is not signed in. Add an account.");
-      await usage.refresh(key, () => fetchLocalUsage(provider, body), true);
+      await usage.refresh(
+        key,
+        () => fetchLocalUsage(provider, body, localCredentialStore(provider)),
+        true,
+      );
       return null;
     },
     historyRefresh: async ({ provider }) => {

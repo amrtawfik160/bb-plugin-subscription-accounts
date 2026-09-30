@@ -69,6 +69,61 @@ const ready: AccountUsage = {
 };
 
 describe("subscription usage page", () => {
+  it("shows Codex windows from the current pool contract and hides unreported windows", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const view = fixture(ready);
+    const account = {
+      id: "codex-pool",
+      provider: "codex",
+      label: "Codex",
+      email: "test@example.com",
+      subscriptionType: "Pro",
+      enabled: true,
+      status: "ready",
+      fiveHourUtilization: null,
+      fiveHourResetAt: null,
+      sevenDayUtilization: null,
+      sevenDayResetAt: null,
+      heldUntil: null,
+      error: null,
+      quotaMetrics: [
+        {
+          label: "Weekly window",
+          used: 10,
+          remaining: 90,
+          limit: 100,
+          unit: "percent",
+          resetAt: now + 86400000,
+          windowMs: 604800000,
+        },
+      ],
+    };
+    const slot = renderSlot(
+      app.navPanels[0],
+      { subPath: "" },
+      {
+        rpc: {
+          overview: () => ({
+            ...view,
+            pool: {
+              ...view.pool,
+              enabled: true,
+              accounts: [account],
+              localLogin: { claude: null, codex: null },
+            },
+          }),
+        },
+      },
+    );
+    fireEvent.click(await slot.findByRole("tab", { name: "All" }));
+    const quotas = within(slot.getByRole("region", { name: "Codex quotas" }));
+    expect(quotas.getByText("10% used")).toBeTruthy();
+    expect(quotas.getByText("90% left")).toBeTruthy();
+    expect(quotas.queryByText(/usage not reported/)).toBeNull();
+    expect(quotas.queryByText("5-hour window")).toBeNull();
+    fireEvent.click(slot.getByRole("tab", { name: /^Codex/ }));
+    expect(slot.getByText("10% used")).toBeTruthy();
+  });
   it.each(["claude", "codex"] as const)(
     "keeps pooled %s CLI allowances visible in All without duplicating base windows",
     async (provider) => {
@@ -194,6 +249,64 @@ describe("subscription usage page", () => {
       within(slot.getByRole("list", { name: "Usage by provider" })).getByRole("button", { name: /Codex/ }),
     );
     expect(slot.getByRole("tab", { name: "Codex" }).getAttribute("aria-selected")).toBe("true");
+  });
+  it("ranks providers and donut slices by the selected total, including unpriced tokens", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const view = fixture(ready);
+    const slot = renderSlot(
+      app.navPanels[0],
+      { subPath: "" },
+      {
+        rpc: {
+          overview: () => ({
+            ...view,
+            history: {
+              claude: aggregateHistory([{ id: "a", model: "test", at: now, tokens: 2000, costUsd: 8 }], now),
+              codex: aggregateHistory([{ id: "b", model: "test", at: now, tokens: 3000, costUsd: 2 }], now),
+              grok: aggregateHistory(
+                [
+                  {
+                    id: "c",
+                    model: "test",
+                    at: now,
+                    tokens: 4000,
+                    costUsd: null,
+                  },
+                ],
+                now,
+              ),
+            },
+          }),
+        },
+      },
+    );
+    fireEvent.click(await slot.findByRole("tab", { name: "All" }));
+    const legend = within(slot.getByRole("list", { name: "Usage by provider" }));
+    const order = () =>
+      legend
+        .getAllByRole("button")
+        .map((button) => button.textContent!.match(/Claude|Codex|Grok|Cursor|Antigravity/)![0]);
+    expect(order()).toEqual(["Claude", "Codex", "Grok", "Cursor", "Antigravity"]);
+    expect(legend.getByText("80.0%")).toBeTruthy();
+    expect(legend.getByText("20.0%")).toBeTruthy();
+    const chart = slot.getByRole("img", {
+      name: "Cost share by provider for 30 Days",
+    });
+    const slices = () => Array.from(chart.querySelectorAll("circle[stroke-dasharray]"));
+    expect(slices().map((slice) => slice.textContent?.split(":")[0])).toEqual(["Claude", "Codex"]);
+    for (const [i, slice] of slices().entries()) {
+      const [arc, gap] = slice.getAttribute("stroke-dasharray")!.split(" ").map(Number);
+      expect(arc).toBeCloseTo(i === 0 ? 79.2 : 19.2);
+      expect(arc + gap).toBeCloseTo(100);
+    }
+    expect(chart.parentElement?.contains(slot.getByText("Available history"))).toBe(false);
+    fireEvent.change(slot.getByRole("combobox", { name: "Usage metric" }), {
+      target: { value: "tokens" },
+    });
+    expect(order()).toEqual(["Grok", "Codex", "Claude", "Cursor", "Antigravity"]);
+    expect(slices().map((slice) => slice.textContent?.split(":")[0])).toEqual(["Grok", "Codex", "Claude"]);
+    expect(legend.getByText("44.4%")).toBeTruthy();
+    expect(slot.getByTestId("all-usage-total").textContent).toBe("9K");
   });
   it("keeps the All chart empty when history is unavailable and supports tab keyboard navigation", async () => {
     const app = await loadPluginApp(() => import("./app"));
