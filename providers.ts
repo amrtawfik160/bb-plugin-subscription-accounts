@@ -167,6 +167,7 @@ export function swapProviderForThread(bbProviderId: string | null | undefined): 
 
 export interface LocalLogin {
   email: string | null;
+  accountId: string | null;
   /** Human plan name, e.g. "Max 20x" or "Pro". */
   plan: string | null;
 }
@@ -199,7 +200,13 @@ export function readClaudeLocal(credentials: string | null, profile: string | nu
   const multiplier = tier ? /(\d+)x\b/i.exec(tier)?.[1] : undefined;
   const type = str(oauth.subscriptionType);
   const plan = type ? `${titleCase(type)}${multiplier ? ` ${multiplier}x` : ""}` : null;
-  return { email, plan };
+  let accountId: string | null = null;
+  try {
+    accountId = str(JSON.parse(profile ?? "{}").oauthAccount?.accountUuid);
+  } catch {
+    // A missing profile must not prevent usage from loading.
+  }
+  return { email, plan, accountId };
 }
 
 /** `~/.codex/auth.json`: email and ChatGPT plan live in the id token. */
@@ -213,7 +220,11 @@ export function readCodexLocal(auth: string | null): LocalLogin | null {
   }
   if (!tokens || !str(tokens.refresh_token)) return null;
   const claims = jwtClaims(tokens.id_token);
-  const openai = claims?.["https://api.openai.com/auth"] as { chatgpt_plan_type?: unknown } | undefined;
+  const openai = claims?.["https://api.openai.com/auth"] as { chatgpt_plan_type?: unknown; chatgpt_account_id?: unknown } | undefined;
   const plan = str(openai?.chatgpt_plan_type);
-  return { email: str(claims?.email), plan: plan ? titleCase(plan) : null };
+  return {
+    email: str(claims?.email),
+    plan: plan ? titleCase(plan) : null,
+    accountId: str(tokens.account_id) ?? str(openai?.chatgpt_account_id),
+  };
 }

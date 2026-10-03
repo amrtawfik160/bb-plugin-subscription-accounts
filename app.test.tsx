@@ -69,6 +69,56 @@ const ready: AccountUsage = {
 };
 
 describe("subscription usage page", () => {
+  it.each(["codex", "claude"] as const)("switches the %s machine account independently of account routing", async (provider) => {
+    const app = await loadPluginApp(() => import("./app"));
+    const view = fixture(ready);
+    const account = (id: string, enabled: boolean) => ({
+      id, provider, label: id, email: `${id}@example.com`, subscriptionType: "Pro",
+      enabled, status: enabled ? "ready" : "disabled", fiveHourUtilization: null,
+      fiveHourResetAt: null, sevenDayUtilization: null, sevenDayResetAt: null,
+      heldUntil: null, error: null, canUseMachine: true,
+    });
+    const data: any = {
+      ...view, pool: {
+        ...view.pool, enabled: true, accounts: [account("current", true), account("other", false)],
+        localLogin: { ...view.pool.localLogin,
+          [provider]: { email: "current@example.com", plan: "Pro", inStack: true, stackAccountId: "current", usage: ready },
+        },
+      },
+    };
+    let finish: (() => void) | undefined;
+    const poolUse = vi.fn((input: unknown) => new Promise<null>((resolve) => {
+      const { id } = input as { id: string };
+      finish = () => {
+        data.pool.localLogin[provider] = { ...data.pool.localLogin[provider], stackAccountId: id, email: `${id}@example.com` };
+        resolve(null);
+      };
+    }));
+    const slot = renderSlot(app.navPanels![0]!, { subPath: "" }, {
+      rpc: { overview: () => structuredClone(data), poolUse },
+    });
+    await slot.findByRole("tablist", { name: "Subscriptions" });
+    fireEvent.click(slot.getByRole("tab", { name: new RegExp(provider === "codex" ? "Codex" : "Claude") }));
+    const picker = slot.getByRole("button", { name: `Switch machine ${provider === "codex" ? "Codex" : "Claude"} account` });
+    fireEvent.keyDown(picker, { key: "Enter" });
+    const menu = await slot.findByRole("menu");
+    expect(within(menu).getByRole("menuitem", { name: "other@example.com" })).toBeTruthy();
+    fireEvent.keyDown(menu, { key: "Escape" });
+    await waitFor(() => expect(slot.queryByRole("menu")).toBeNull());
+    fireEvent.keyDown(picker, { key: "Enter" });
+    const opened = await slot.findByRole("menu");
+    expect(slot.queryByRole("button", { name: "Use current@example.com on this machine" })).toBeNull();
+    fireEvent.click(within(opened).getByRole("menuitem", { name: "other@example.com" }));
+    expect(poolUse).toHaveBeenCalledWith({ id: "other" });
+    expect((picker as HTMLButtonElement).disabled).toBe(true);
+    expect((slot.getByRole("button", { name: "Use other@example.com on this machine" }) as HTMLButtonElement).disabled).toBe(true);
+    finish!();
+    await waitFor(() => expect(slot.getByRole("button", { name: "Use current@example.com on this machine" })).toBeTruthy());
+    expect(slot.queryByRole("button", { name: "Use other@example.com on this machine" })).toBeNull();
+    expect(slot.inspection.rpcCalls.map((call) => call.method)).not.toContain("poolToggle");
+    expect(slot.inspection.rpcCalls.map((call) => call.method)).not.toContain("poolRouting");
+  });
+
   it("shows Codex windows from the current pool contract and hides unreported windows", async () => {
     const app = await loadPluginApp(() => import("./app"));
     const view = fixture(ready);
