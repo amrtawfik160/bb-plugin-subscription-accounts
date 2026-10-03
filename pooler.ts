@@ -46,14 +46,14 @@ export type PoolAccount = z.infer<typeof accountSchema>;
 export function poolQuotaMetrics(
   account: Record<string, unknown>,
 ): UsageMetric[] {
-    const windows = Array.isArray(account.limitWindows) ? account.limitWindows
-    : [];
+  const windows = Array.isArray(account.limitWindows) ? account.limitWindows : [];
   const rows: UsageMetric[] = [];
-    if (windows.length) {
+  if (windows.length) {
     for (const raw of windows) {
       const window = object(raw),
         minutes = number(window.windowMinutes),
         used = number(window.utilization);
+      if (minutes === null || minutes <= 0) continue;
       const label =
         minutes === 300
           ? "5-hour window"
@@ -61,11 +61,7 @@ export function poolQuotaMetrics(
             ? "Weekly window"
             : minutes === 1440
               ? "Daily window"
-              : minutes
-                ? `${minutes / 60}-hour window`
-                : window.slot === "secondary"
-                  ? "Weekly window"
-                  : "5-hour window";
+              : `${minutes / 60}-hour window`;
       const row = metric(
         label,
         used === null ? null : used * 100,
@@ -76,8 +72,7 @@ export function poolQuotaMetrics(
       if (row && !rows.some((r) => r.label === label))
         rows.push({
           ...row,
-          windowMs:
-            (minutes ?? (label === "Weekly window" ? 10080 : 300)) * 60000,
+          windowMs: minutes * 60000,
         });
     }
   } else {
@@ -100,7 +95,7 @@ export function poolQuotaMetrics(
     const family = object(raw),
       used = number(family.utilization);
     const row = metric(
-      `${name.charAt(0).toUpperCase() }${name.slice(1) } · weekly`,
+      `${name.charAt(0).toUpperCase()}${name.slice(1)} · weekly`,
       used === null ? null : used * 100,
       100,
       "percent",

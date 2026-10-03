@@ -1,10 +1,11 @@
 // Subscription Accounts page: one tab per AI subscription. Antigravity, Cursor
 // and Grok accounts are swapped by this plugin; Claude and Codex accounts are
 // managed through bb's Account Pooler, shown here in the same layout.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 
 import type { rpcContract } from "./server";
 import {
@@ -21,6 +22,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Icon } from "@/components/ui/icon";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import { usePortalScopeProps } from "@/lib/portal-scope";
 
 type SwapId = "antigravity" | "cursor" | "grok";
 type PoolId = "claude" | "codex";
@@ -58,6 +60,7 @@ interface PoolAccount {
   heldUntil: number | null;
   error: string | null;
   quotaMetrics?: UsageMetric[];
+  canUseMachine?: boolean;
 }
 interface Login {
   provider: string;
@@ -85,6 +88,7 @@ export interface Overview {
         email: string | null;
         plan: string | null;
         inStack: boolean;
+        stackAccountId?: string | null;
         usage: AccountUsage;
       } | null
     >;
@@ -135,13 +139,18 @@ function useOverview() {
   const rpc = useRpc<typeof rpcContract>();
   const [data, setData] = useState<Overview | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const requestId = useRef(0);
   const refetch = useCallback(() => {
+    const currentRequest = ++requestId.current;
     rpc.call("overview").then(
       (next) => {
+        if (currentRequest !== requestId.current) return;
         setData(next as Overview);
         setError(null);
       },
-      (cause) => setError(message(cause)),
+      (cause) => {
+        if (currentRequest === requestId.current) setError(message(cause));
+      },
     );
   }, [rpc]);
   useEffect(refetch, [refetch]);
@@ -815,27 +824,67 @@ const POOL_STATUS: Record<PoolAccount["status"], { text: string; tone: "good" | 
   disabled: { text: "Off", tone: "idle" },
 };
 
-/** The subscription this machine's CLI is signed into, with a one-click add. */
+/** The subscription this machine's CLI is signed into. */
 function MachineLogin({
   provider,
   label,
   data,
   rpc,
   run,
+  switching,
+  onUse,
 }: {
   provider: PoolId;
   label: string;
   data: Overview;
   rpc: Rpc;
   run: Run;
+  switching: boolean;
+  onUse: (id: string) => void;
 }) {
   const local = data.pool.localLogin[provider];
+  const portalScope = usePortalScopeProps();
+  const alternatives = data.pool.accounts.filter((account) =>
+    account.provider === provider && account.canUseMachine && account.id !== local?.stackAccountId,
+  );
+  const switchControl = alternatives.length ? (
+    <DropdownMenu.Root modal={false}>
+      <DropdownMenu.Trigger asChild>
+        <Button size="sm" variant="outline" disabled={switching} aria-label={`Switch machine ${label} account`}>
+          {switching ? "Switching…" : "Switch account"}
+          <Icon name="ChevronDown" className="size-3.5" />
+        </Button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content
+          {...portalScope}
+          aria-label={`Choose machine ${label} account`}
+          align="end"
+          sideOffset={6}
+          collisionPadding={8}
+          className="z-50 min-w-48 max-w-[calc(100vw-2rem)] rounded-md border border-border bg-card p-1 text-foreground shadow-md"
+        >
+          {alternatives.map((account) => (
+            <DropdownMenu.Item
+              key={account.id}
+              disabled={switching}
+              onSelect={() => onUse(account.id)}
+              className="cursor-pointer rounded px-3 py-2.5 text-sm outline-none data-[highlighted]:bg-state-hover data-[disabled]:opacity-50"
+            >
+              {account.email ?? account.label}
+            </DropdownMenu.Item>
+          ))}
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  ) : null;
   if (!local) {
     return (
       <Notice>
         <span className="text-muted-foreground">
-          This machine isn't signed in to a {label} subscription. Add an account below to sign one in.
+          This machine isn't signed in to a {label} subscription. Use a saved account, or add one below and then use it on this machine.
         </span>
+        {switchControl}
       </Notice>
     );
   }
@@ -866,7 +915,13 @@ function MachineLogin({
             Add to stack
           </Button>
         )}
+        {switchControl}
       </div>
+      {alternatives.length ? (
+        <p className="text-xs text-muted-foreground">
+          Switching changes this machine's CLI login. New CLI processes use it. Routing and existing conversations keep their current settings.
+        </p>
+      ) : null}
       <UsageDetails
         usage={local.usage}
         now={data.now}
@@ -882,6 +937,13 @@ function PoolTab({ provider, data, rpc, run }: { provider: PoolId; data: Overvie
   const label = provider === "claude" ? "Claude" : "Codex";
   const pool = data.pool;
   const accounts = pool.accounts.filter((a) => a.provider === provider);
+  const [switching, setSwitching] = useState<string | null>(null);
+  const switchMachine = (id: string) => {
+    if (switching || !id) return;
+    setSwitching(id);
+    void run(() => rpc.call("poolUse", { id }), `Machine ${label} login switched`)
+      .finally(() => setSwitching(null));
+  };
 
   if (!pool.installed) {
     return (
@@ -893,7 +955,7 @@ function PoolTab({ provider, data, rpc, run }: { provider: PoolId; data: Overvie
   if (!pool.enabled) {
     return (
       <div className="space-y-5">
-        <MachineLogin provider={provider} label={label} data={data} rpc={rpc} run={run} />
+        <MachineLogin provider={provider} label={label} data={data} rpc={rpc} run={run} switching={switching !== null} onUse={switchMachine} />
         <div className="space-y-3 rounded-lg border border-border bg-card p-4 text-sm">
           <p className="font-medium">{label} accounts run through bb's Account Pooler</p>
           <p className="text-muted-foreground">
@@ -910,7 +972,7 @@ function PoolTab({ provider, data, rpc, run }: { provider: PoolId; data: Overvie
     <div className="space-y-5">
       {pool.error ? <Notice tone="warn">{pool.error}</Notice> : null}
 
-      <MachineLogin provider={provider} label={label} data={data} rpc={rpc} run={run} />
+      <MachineLogin provider={provider} label={label} data={data} rpc={rpc} run={run} switching={switching !== null} onUse={switchMachine} />
 
       <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-card px-4 py-3">
         <Checkbox
@@ -923,7 +985,7 @@ function PoolTab({ provider, data, rpc, run }: { provider: PoolId; data: Overvie
         <span className="space-y-0.5">
           <span className="block text-sm font-medium">Route {label} threads through these accounts</span>
           <span className="block text-xs text-muted-foreground">
-            New turns use the first account below that has quota. When it runs out, the next one takes over.
+            Threads use the current account until it runs out, then follow this order. Existing conversations stay on their account while it has quota.
           </span>
         </span>
       </label>
@@ -968,7 +1030,20 @@ function PoolTab({ provider, data, rpc, run }: { provider: PoolId; data: Overvie
                       {account.error ? ` · ${account.error}` : ""}
                     </span>
                   </div>
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {data.pool.localLogin[provider]?.stackAccountId === account.id ? (
+                      <span className="text-xs text-muted-foreground">On this machine</span>
+                    ) : account.canUseMachine ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        aria-label={`Use ${account.email ?? account.label} on this machine`}
+                        disabled={switching !== null}
+                        onClick={() => switchMachine(account.id)}
+                      >
+                        {switching === account.id ? "Switching…" : "Use on this machine"}
+                      </Button>
+                    ) : null}
                     <Button
                       size="sm"
                       variant="ghost"

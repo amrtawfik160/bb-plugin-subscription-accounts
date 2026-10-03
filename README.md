@@ -48,6 +48,12 @@ Demo screenshots use sample accounts and usage.
   is never touched or logged out.
 - **Lets you manage the list by hand.** Reorder accounts, switch now, skip to
   the next one, clear an out-of-quota mark, or remove an account.
+- **Switches the machine login.** Claude and Codex saved subscription accounts
+  can replace the server machine's CLI login. Choose **Switch account** on the
+  machine login card or **Use on this machine** beside a saved account. An
+  unstored subscription login is imported first. Routing settings, enabled accounts and failover order stay as
+  configured. New CLI processes read the selected login; existing conversations
+  can remain pinned to their current pooled account.
 
 ## Demo
 
@@ -117,8 +123,10 @@ bb subs reset <provider> [<name>]          # clear out-of-quota marks
 bb subs remove <provider> <name>
 ```
 
-`<provider>` is `antigravity`, `cursor` or `grok`. Claude and Codex accounts
-are managed on the page or with bb's own `bb pool` command.
+`<provider>` is `antigravity`, `cursor` or `grok`. For a Claude or Codex machine
+login, use `bb subs use <claude|codex> <account-id>` with an ID from
+`bb subs list --json`. Other Claude and Codex account operations use the page
+or bb's own `bb pool` command.
 
 ## Settings
 
@@ -176,7 +184,10 @@ uses ENERGY 1 / RHYTHM 1 / MOTION 1, matching the existing accounts page.
   `~/.cache/bb-subscription-accounts/`, which is deleted once the login is
   saved or the sign-in is cancelled.
 - Claude and Codex credentials are held by bb's Account Pooler, not by this
-  plugin.
+  plugin. Machine switching reads its OAuth secret file on the server and
+  writes the selected CLI login with mode `0600`. Credentials never reach the
+  page or command output. This adapter depends on BB 0.44's Account Pooler
+  secret-file layout; an unavailable or invalid secret stops the switch.
 
 ## Limits
 

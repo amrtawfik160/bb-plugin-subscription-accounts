@@ -18,6 +18,7 @@ import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 
 import { LoginSession, type LoginState, findBinary, stripAnsi } from "./login.js";
+import { machineCredentials, readLoginFile, replaceLoginFiles } from "./machine-login.js";
 import {
   type AccountMeta,
   emptyPool,
@@ -111,12 +112,14 @@ const poolAccountSchema = z.object({
   heldUntil: z.number().nullable(),
   error: z.string().nullable(),
   quotaMetrics: z.array(usageMetricSchema),
+  canUseMachine: z.boolean(),
 });
 
 const localLoginSchema = z.object({
   email: z.string().nullable(),
   plan: z.string().nullable(),
   inStack: z.boolean(),
+  stackAccountId: z.string().nullable(),
   usage: usageSchema,
 });
 
@@ -183,6 +186,7 @@ export const rpcContract = defineRpcContract({
   loginCancel: { input: z.null(), output: ok },
   poolEnable: { input: z.null(), output: ok },
   poolImport: { input: z.object({ provider: poolIdSchema }), output: ok },
+  poolUse: { input: z.object({ id: z.string().min(1) }), output: ok },
   poolRemove: { input: z.object({ id: z.string() }), output: ok },
   poolToggle: {
     input: z.object({ id: z.string(), enabled: z.boolean() }),
@@ -845,6 +849,7 @@ export default async function plugin(bb: BbPluginApi) {
       heldUntil: account.heldUntil ?? null,
       error: account.error ?? null,
       quotaMetrics: poolQuotaMetrics(account),
+      canUseMachine: account.kind === "oauth",
     };
   }
 
@@ -906,13 +911,18 @@ export default async function plugin(bb: BbPluginApi) {
       body,
       localCredentialStore(account.provider, identity),
     );
+    const existingIds = new Set((await pool.view()).accounts.map((a) => a.id));
     const replacement = await pool.importLocal(
       account.provider,
       account.priority,
       account.label,
     );
+    const reused = replacement.id === account.id;
+    const discardReplacement = async () => {
+      if (!existingIds.has(replacement.id)) await pool.remove(replacement.id);
+    };
     if (poolAccountIdentity(replacement) !== identity) {
-      await pool.remove(replacement.id);
+      await discardReplacement();
       throw new UsageError(
         "The CLI login changed during reconnect. Refresh again.",
       );
@@ -920,18 +930,19 @@ export default async function plugin(bb: BbPluginApi) {
     const current = await pool.view();
     const fresh = current.accounts.find((a) => a.id === replacement.id);
     if (!fresh || fresh.error || !poolQuotaMetrics(fresh).length) {
-      await pool.remove(replacement.id);
+      await discardReplacement();
       throw new UsageError(
         "The replacement login could not fetch quotas. The saved account was kept.",
       );
     }
+    if (reused) return;
     const order = current.accounts
       .filter((a) => a.provider === account.provider && a.id !== replacement.id)
       .map((a) => (a.id === account.id ? replacement.id : a.id));
     try {
       await pool.reorder(account.provider, [...order, account.id]);
     } catch (error) {
-      await pool.remove(replacement.id);
+      await discardReplacement();
       throw error;
     }
     await pool.remove(account.id);
@@ -965,14 +976,17 @@ export default async function plugin(bb: BbPluginApi) {
       void usage.refresh(key, () =>
         fetchLocalUsage(provider, body, localCredentialStore(provider)),
       );
+      const matched = accounts.find((a) =>
+        a.provider === provider && (local.accountId
+          ? poolAccountIdentity(a) === local.accountId
+          : local.email !== null && a.email?.toLowerCase() === local.email.toLowerCase()),
+      );
       return {
         ...local,
-        inStack: accounts.some(
-          (a) =>
-            a.provider === provider &&
-            local.email !== null &&
-            a.email?.toLowerCase() === local.email.toLowerCase(),
-        ),
+        email: local.email ?? matched?.email ?? null,
+        plan: local.plan ?? matched?.subscriptionType ?? null,
+        inStack: Boolean(matched),
+        stackAccountId: matched?.id ?? null,
         usage: usage.get(key),
       };
     };
@@ -980,6 +994,54 @@ export default async function plugin(bb: BbPluginApi) {
       claude: mark("claude", readClaudeLocal(claudeCreds, claudeProfile), claudeCreds),
       codex: mark("codex", readCodexLocal(codexAuth), codexAuth),
     };
+  }
+
+  async function usePoolAccount(id: string) {
+    await serialized(async () => {
+      const view = await pool.view();
+      if (view.error) throw new Error(view.error);
+      const account = view.accounts.find((a) => a.id === id);
+      if (!account) throw new Error("This saved account is unavailable. Refresh the account list.");
+      const target = localCredentialPath(account.provider);
+      const profilePath = path.join(os.homedir(), ".claude.json");
+      const before = await readLoginFile(target);
+      const profile = account.provider === "claude" ? await readLoginFile(profilePath) : null;
+      const local = account.provider === "claude" ? readClaudeLocal(before, profile) : readCodexLocal(before);
+      const matched = local && view.accounts.find((a) => a.provider === account.provider &&
+        (local.accountId ? poolAccountIdentity(a) === local.accountId :
+          local.email !== null && a.email?.toLowerCase() === local.email.toLowerCase()));
+      if (matched?.id === id) return;
+      // Validate the target before importing or touching the current login.
+      await machineCredentials(bb.server.experimental_dataDir, account);
+      if (local && !matched) {
+        const priorities = view.accounts.filter((a) => a.provider === account.provider).map((a) => a.priority);
+        await pool.importLocal(account.provider, priorities.length ? Math.max(...priorities) + 1 : 0);
+      }
+      const after = await machineCredentials(bb.server.experimental_dataDir, account);
+      const files = [{ path: target, before, after }];
+      if (account.provider === "claude") {
+        let existing: Record<string, unknown>;
+        try {
+          const parsed = JSON.parse(profile ?? "{}");
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+          existing = parsed;
+        } catch {
+          throw new Error("The Claude profile is invalid. Repair it before switching accounts.");
+        }
+        files.unshift({
+          path: profilePath,
+          before: profile,
+          after: JSON.stringify({ ...existing, oauthAccount: {
+            accountUuid: account.accountUuid ?? null,
+            emailAddress: account.email,
+          } }),
+        });
+      }
+      await replaceLoginFiles(files);
+      localUsageKey(account.provider, after);
+    });
+    changed();
+    return null;
   }
 
   bb.rpc.register(rpcContract, {
@@ -1102,6 +1164,7 @@ export default async function plugin(bb: BbPluginApi) {
       changed();
       return null;
     },
+    poolUse: async ({ id }) => usePoolAccount(id),
     poolRemove: async ({ id }) => {
       await pool.remove(id);
       changed();
@@ -1183,7 +1246,7 @@ export default async function plugin(bb: BbPluginApi) {
       {
         name: "use",
         summary: "Switch a provider to an account now",
-        usage: `bb subs use <${swapList}> <name>`,
+        usage: `bb subs use <${swapList}|claude|codex> <name-or-account-id>`,
       },
       {
         name: "next",
@@ -1263,6 +1326,15 @@ export default async function plugin(bb: BbPluginApi) {
             return done(`Saved ${spec.label} account ${name}.`);
           }
           case "use": {
+            if (rawProvider === "claude" || rawProvider === "codex") {
+              if (!rawName) throw new Error("Provide a saved account ID from bb subs list.");
+              const view = await pool.view();
+              if (!view.accounts.some((a) => a.id === rawName && a.provider === rawProvider)) {
+                throw new Error("No saved account with this ID for this provider.");
+              }
+              await usePoolAccount(rawName);
+              return done(`Switched the machine ${rawProvider} login.`);
+            }
             const meta = await useAccount(provider(), rawName ?? "");
             return done(`Now using ${meta.name}${meta.email ? ` (${meta.email})` : ""}.`);
           }

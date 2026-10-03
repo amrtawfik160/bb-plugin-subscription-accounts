@@ -32,6 +32,7 @@ async function setup(plugins = { list: async () => [] } as any) {
   await fs.writeFile(file, savedLogin, { mode: 0o600 });
   const { bb, harness } = createFakePluginHost({
     pluginId: "subscription-accounts",
+    dataDir: path.join(home, ".bb"),
     sdk: { plugins },
   });
   dispose = () => harness.lifecycle.dispose();
@@ -41,7 +42,76 @@ async function setup(plugins = { list: async () => [] } as any) {
 }
 
 describe("subscription usage RPC", () => {
-  it("reconnects stale pooled Claude credentials only after verifying the live account, preserving order", async () => {
+  it.each([
+    ["codex", true], ["claude", true], ["codex", false], ["claude", false],
+  ] as const)("switches the %s machine login and preserves its previous login (saved: %s)", async (provider, saved) => {
+    const jwt = (claims: object) => `h.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.s`;
+    const accounts = [
+      { id: "old", provider, kind: "oauth", label: "Old", email: "old@example.com", enabled: true,
+        priority: 0, status: "ready", accountUuid: "old", codexAccountId: "old" },
+      { id: "new", provider, kind: "oauth", label: "New", email: "new@example.com", enabled: false,
+        priority: 1, status: "disabled", accountUuid: "new", codexAccountId: "new", subscriptionType: "pro" },
+    ];
+    if (!saved) accounts.shift();
+    const callRpc = vi.fn(async ({ method }: any) => {
+      if (method === "account.list") return accounts;
+      if (method === "status.get") return { routing: { claude: true, codex: true } };
+      if (method === "account.add") return {
+        id: "old", provider, kind: "oauth", label: "Old", email: "old@example.com",
+        enabled: true, priority: 2, status: "ready", accountUuid: "old", codexAccountId: "old",
+      };
+      throw new Error(`Unexpected mutation: ${method}`);
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({})));
+    const { harness } = await setup({ list: async () => [{ id: "account-pool", enabled: true }], callRpc });
+    const dir = path.join(home!, ".bb/plugins/account-pool/secrets/accounts");
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, "account-new.json"), JSON.stringify({
+      kind: "oauth", accessToken: "new-access", refreshToken: "new-refresh", expiresAt: Date.now() + 3600000,
+      idToken: jwt({ email: "new@example.com", "https://api.openai.com/auth": { chatgpt_account_id: "new", chatgpt_plan_type: "pro" } }),
+    }));
+    const file = path.join(home!, provider === "codex" ? ".codex/auth.json" : ".claude/.credentials.json");
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, JSON.stringify(provider === "codex" ? {
+      tokens: { access_token: "old-access", refresh_token: "old-refresh", account_id: "old", id_token: jwt({ email: "old@example.com" }) },
+    } : { claudeAiOauth: { accessToken: "old-access", refreshToken: "old-refresh" } }));
+    const profile = path.join(home!, ".claude.json");
+    if (provider === "claude") await fs.writeFile(profile, JSON.stringify({ theme: "dark", oauthAccount: { emailAddress: "old@example.com", accountUuid: "old" } }));
+    expect(await harness.behavior.callRpc("poolUse", { id: "new" })).toBeNull();
+    const result = JSON.parse(await fs.readFile(file, "utf8"));
+    expect(provider === "codex" ? result.tokens.access_token : result.claudeAiOauth.accessToken).toBe("new-access");
+    expect((await fs.stat(file)).mode & 0o777).toBe(0o600);
+    if (provider === "claude") expect(JSON.parse(await fs.readFile(profile, "utf8"))).toMatchObject({
+      theme: "dark", oauthAccount: { emailAddress: "new@example.com", accountUuid: "new" },
+    });
+    const overview = await harness.behavior.callRpc("overview", null) as any;
+    expect(overview.pool.localLogin[provider]).toMatchObject({ email: "new@example.com", inStack: true, stackAccountId: "new" });
+    expect(JSON.stringify(overview)).not.toMatch(/new-access|new-refresh/);
+    expect(callRpc.mock.calls.map(([call]) => call.method)).not.toContain("account.enable");
+    expect(callRpc.mock.calls.filter(([call]) => call.method === "account.add")).toHaveLength(saved ? 0 : 1);
+    await expect(harness.behavior.callRpc("poolUse", { id: "missing" })).rejects.toThrow("unavailable");
+    expect(await fs.readFile(file, "utf8")).toBe(JSON.stringify(result));
+  });
+
+  it("does not merge Codex organizations that have the same email", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({})));
+    const { harness } = await setup({
+      list: async () => [{ id: "account-pool", enabled: true }],
+      callRpc: async ({ method }: any) => method === "account.list" ? [{
+        id: "saved", provider: "codex", kind: "oauth", label: "Saved", email: "same@example.com",
+        codexAccountId: "other-org", enabled: true, priority: 0, status: "ready",
+      }] : { routing: { claude: false, codex: false } },
+    });
+    await fs.mkdir(path.join(home!, ".codex"));
+    await fs.writeFile(path.join(home!, ".codex/auth.json"), JSON.stringify({ tokens: {
+      refresh_token: "refresh", account_id: "this-org",
+      id_token: `h.${Buffer.from(JSON.stringify({ email: "same@example.com" })).toString("base64url")}.s`,
+    } }));
+    const overview = await harness.behavior.callRpc("overview", null) as any;
+    expect(overview.pool.localLogin.codex).toMatchObject({ inStack: false, stackAccountId: null });
+  });
+
+  it.each([false, true])("reconnects stale pooled Claude credentials, including in-place imports (%s)", async (reused) => {
     const old = {
       id: "old",
       provider: "claude",
@@ -65,7 +135,7 @@ describe("subscription usage RPC", () => {
       if (method === "account.add") {
         const fresh = {
           ...old,
-          id: "new",
+          id: reused ? "old" : "new",
           label: input.label,
           priority: input.priority,
           status: "ready",
@@ -73,7 +143,8 @@ describe("subscription usage RPC", () => {
           fiveHourUtilization: 0,
           sevenDayUtilization: 0.95,
         };
-        accounts.push(fresh);
+        if (reused) accounts.splice(0, 1, fresh);
+        else accounts.push(fresh);
         const { status, ...metadata } = fresh;
         result = metadata;
       }
@@ -117,8 +188,13 @@ describe("subscription usage RPC", () => {
     );
     await harness.behavior.callRpc("poolRefresh", { id: "old" });
     expect(accounts).toMatchObject([
-      { id: "new", priority: 5, label: "Saved", status: "ready" },
+      { id: reused ? "old" : "new", priority: 5, label: "Saved", status: "ready" },
     ]);
+    if (reused) {
+      expect(calls).not.toContain("account.remove");
+      expect(calls).not.toContain("account.reorder");
+      return;
+    }
     expect(calls.indexOf("account.reorder")).toBeLessThan(
       calls.indexOf("account.remove"),
     );

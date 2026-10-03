@@ -67,8 +67,8 @@ describe("local Claude / Codex logins", () => {
       claudeAiOauth: { refreshToken: "r", subscriptionType: "max", rateLimitTier: "default_claude_max_20x" },
     });
     const profile = JSON.stringify({ oauthAccount: { emailAddress: "me@x.com" } });
-    expect(readClaudeLocal(creds, profile)).toEqual({ email: "me@x.com", plan: "Max 20x" });
-    expect(readClaudeLocal(creds, null)).toEqual({ email: null, plan: "Max 20x" });
+    expect(readClaudeLocal(creds, profile)).toEqual({ email: "me@x.com", plan: "Max 20x", accountId: null });
+    expect(readClaudeLocal(creds, null)).toEqual({ email: null, plan: "Max 20x", accountId: null });
     expect(readClaudeLocal(JSON.stringify({}), profile)).toBeNull();
     expect(readClaudeLocal(null, profile)).toBeNull();
   });
@@ -80,7 +80,7 @@ describe("local Claude / Codex logins", () => {
         id_token: jwt({ email: "me@x.com", "https://api.openai.com/auth": { chatgpt_plan_type: "pro" } }),
       },
     });
-    expect(readCodexLocal(auth)).toEqual({ email: "me@x.com", plan: "Pro" });
+    expect(readCodexLocal(auth)).toEqual({ email: "me@x.com", plan: "Pro", accountId: null });
     expect(readCodexLocal(JSON.stringify({ OPENAI_API_KEY: "k" }))).toBeNull();
   });
 });

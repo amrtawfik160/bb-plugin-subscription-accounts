@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import { poolQuotaMetrics } from "./pooler";
 
 describe("pool quota compatibility", () => {
+  it("ignores unreported placeholder windows instead of inventing weekly quota", () => {
+    expect(poolQuotaMetrics({ limitWindows: [
+      { slot: "primary", windowMinutes: 300, utilization: 0.25 },
+      { slot: "secondary", windowMinutes: null, utilization: 0 },
+    ] })).toMatchObject([{ label: "5-hour window", used: 25 }]);
+  });
   it("keeps reported Codex windows when the legacy fields are null", () => {
     const metrics = poolQuotaMetrics({
       fiveHourUtilization: null,
