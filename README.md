@@ -48,12 +48,9 @@ Demo screenshots use sample accounts and usage.
   is never touched or logged out.
 - **Lets you manage the list by hand.** Reorder accounts, switch now, skip to
   the next one, clear an out-of-quota mark, or remove an account.
-- **Switches the machine login.** Claude and Codex saved subscription accounts
-  can replace the server machine's CLI login. Choose **Switch account** on the
-  machine login card or **Use on this machine** beside a saved account. An
-  unstored subscription login is imported first. Routing settings, enabled accounts and failover order stay as
-  configured. New CLI processes read the selected login; existing conversations
-  can remain pinned to their current pooled account.
+- **Switches the machine login.** Choosing an account writes that provider's
+  CLI login on this machine. New processes read it. A login that is not in the
+  stack yet is saved first, so a switch does not drop it.
 
 ## Demo
 
@@ -76,8 +73,8 @@ Demo screenshots use sample accounts and usage.
 | **Antigravity** (`acp-antigravity`) | This plugin swaps agy's login file | Google link, then paste the code (60s window) |
 | **Cursor** (`acp-cursor`) | This plugin swaps Cursor's login file | Cursor link, finish in the browser |
 | **Grok** (`acp-grok`) | This plugin swaps Grok's login file | x.ai link plus a device code |
-| **Claude Code** | bb's built-in **Account Pooler** | Claude link, then paste the code |
-| **Codex** | bb's built-in **Account Pooler** | OpenAI link plus a device code |
+| **Claude Code** | This plugin swaps Claude's login file | Sign in with the Claude CLI, then choose Save it |
+| **Codex** | This plugin swaps Codex's login file | Sign in with the Codex CLI, then choose Save it |
 
 **Antigravity, Cursor and Grok** each keep their login in one file on the bb
 server machine (`~/.gemini/antigravity-cli/antigravity-oauth-token`,
@@ -86,13 +83,11 @@ copy of that file for each account and swaps the right one in. After a switch
 it stops the thread's agent process, so the retried turn starts a new process
 that reads the new login.
 
-**Claude Code and Codex** accounts go through bb's built-in Account Pooler.
-The pooler sends each request to an account that still has quota, which is
-more reliable for these long-running sessions than swapping files. This
-plugin gives it the same page: usage bars for the 5-hour and 7-day windows,
-reordering, turning accounts on and off, and sign-in. The first time you open
-the Claude or Codex tab it offers to turn the pooler on. Turning it on changes
-nothing until you add an account.
+**Claude Code and Codex** keep their logins in `~/.claude/.credentials.json`
+(and `~/.claude.json`) and `~/.codex/auth.json`. This plugin saves a copy of
+each login and swaps the file when a 5-hour or weekly limit is hit. New threads
+use that login directly. The Account Pooler stays off. Sign in with the CLI,
+then choose **Save it** on the Claude or Codex tab.
 
 ## Install
 
@@ -123,10 +118,9 @@ bb subs reset <provider> [<name>]          # clear out-of-quota marks
 bb subs remove <provider> <name>
 ```
 
-`<provider>` is `antigravity`, `cursor` or `grok`. For a Claude or Codex machine
-login, use `bb subs use <claude|codex> <account-id>` with an ID from
-`bb subs list --json`. Other Claude and Codex account operations use the page
-or bb's own `bb pool` command.
+`<provider>` is `antigravity`, `claude`, `codex`, `cursor` or `grok`. Claude and
+Codex use the same `add`, `use`, `next`, `reset` and `remove` commands. Sign in
+with the CLI first, then `bb subs add claude` or `bb subs add codex`.
 
 ## Settings
 
@@ -135,7 +129,7 @@ Under **Settings → Plugins → Subscription Accounts**, or with
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `autoSwitch` | `true` | Switch and retry automatically on quota errors (Antigravity, Cursor, Grok) |
+| `autoSwitch` | `true` | Switch and retry automatically on quota errors |
 | `fallbackCooldownMinutes` | `60` | How long an account counts as used up when the error has no reset time |
 | `antigravityOAuthClientId` / `antigravityOAuthClientSecret` | Unset | Protected OAuth client settings for refreshing Antigravity usage access; otherwise refresh the CLI login |
 
@@ -145,8 +139,8 @@ Antigravity shows shared Gemini and Claude pool quotas, with weekly windows
 when its API supports them. Cursor shows billing-cycle usage, model allowances,
 on-demand spend and credit grants; request-based plans use the dashboard
 fallback. Grok shows its unified weekly pool and any pay-as-you-go cap. Claude
-and Codex keep their pooler usage displays, and the machine's current login
-also shows usage without requiring an import into the pooler.
+and Codex show usage from the saved login, and the machine's current login
+also shows usage before you save it.
 
 The adapters were researched from [OpenUsage](https://github.com/robinebers/openusage).
 They call each provider directly from the bb server using that account's saved
@@ -183,11 +177,11 @@ uses ENERGY 1 / RHYTHM 1 / MOTION 1, matching the existing accounts page.
 - Sign-in runs the provider's own CLI with a temporary `HOME` under
   `~/.cache/bb-subscription-accounts/`, which is deleted once the login is
   saved or the sign-in is cancelled.
-- Claude and Codex credentials are held by bb's Account Pooler, not by this
-  plugin. Machine switching reads its OAuth secret file on the server and
+- Claude and Codex logins are copied into this plugin's database. Switching
   writes the selected CLI login with mode `0600`. Credentials never reach the
-  page or command output. This adapter depends on BB 0.44's Account Pooler
-  secret-file layout; an unavailable or invalid secret stops the switch.
+  page or command output. The first load can copy enabled Account Pooler
+  logins that are already on this machine. It does not delete, disable, or
+  sign out those accounts, and it leaves the Account Pooler off.
 
 ## Limits
 
@@ -197,9 +191,10 @@ uses ENERGY 1 / RHYTHM 1 / MOTION 1, matching the existing accounts page.
   to every thread's next turn.
 - Quota errors are recognised by their text. Antigravity's are matched
   exactly. Cursor and Grok use common wording ("usage limit", "rate limit
-  exceeded", "quota exceeded"). If a provider changes its message, the
-  automatic switch will not fire until the pattern is updated in
-  [`providers.ts`](providers.ts).
+  exceeded", "quota exceeded"). Claude and Codex switch on 5-hour and weekly
+  limit messages. A disabled Account Pooler error, an overload, or an auth
+  failure does not switch. If a provider changes its message, the automatic
+  switch will not fire until the pattern is updated.
 - Antigravity's sign-in code is only accepted for 60 seconds, a limit set by
   `agy`. If it runs out, click **Try again** for a new link.
 
@@ -216,9 +211,10 @@ bb plugin install . --yes     # or: bb plugin reload subscription-accounts
 | File | Purpose |
 |---|---|
 | `providers.ts` | Login file location, identity, sign-in command and quota pattern per provider |
+| `direct-login.ts` | Claude and Codex limit detection, login copies, and clearing the pooler route |
 | `pool.ts` | Rotation order, reset-time parsing, naming (pure, unit-tested) |
 | `login.ts` | Runs a provider CLI's sign-in in a temporary HOME |
-| `pooler.ts` | Calls bb's Account Pooler for Claude and Codex |
+| `pooler.ts` | Reads Account Pooler metadata. It does not turn that plugin on |
 | `server.ts` | Storage, automatic switching, page RPC, `bb subs` CLI |
 | `app.tsx` | The Subscription Accounts page |
 | `usage.ts` | Normalized quota metrics, provider mappers and five-minute cache |

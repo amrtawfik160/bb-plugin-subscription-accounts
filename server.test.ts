@@ -2,7 +2,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
+import { createFakePluginHost, makeTurnFailedEvent } from "@get-bb/plugin-sdk/testing";
+import { DatabaseSync } from "node:sqlite";
 import plugin from "./server";
 
 const billing = {
@@ -332,5 +333,202 @@ describe("subscription usage RPC", () => {
     tokenFile = file;
     await harness.behavior.callRpc("usageRefresh", { provider: "grok", name: "test" });
     expect(await fs.readFile(file, "utf8")).toBe(newer);
+  });
+});
+
+describe("Claude and Codex direct switching", () => {
+  async function host(threads?: {
+    get: (input: { threadId: string }) => Promise<{ providerId: string }>;
+    stop: () => Promise<void>;
+    retry: (input: { reason?: string }) => Promise<void>;
+    events: { list: () => Promise<{ data: { detail: string } }[]> };
+  }) {
+    home = await fs.mkdtemp(path.join(os.tmpdir(), "direct-switch-"));
+    vi.spyOn(os, "homedir").mockReturnValue(home);
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({})));
+    const created = createFakePluginHost({
+      pluginId: "subscription-accounts",
+      dataDir: path.join(home, ".bb"),
+      sdk: { plugins: { list: async () => [] }, ...(threads ? { threads } : {}) },
+    });
+    dispose = () => created.harness.lifecycle.dispose();
+    await plugin(created.bb);
+    return created.harness;
+  }
+
+  async function writeClaude(access: string, uuid: string, email: string) {
+    const creds = path.join(home!, ".claude/.credentials.json");
+    await fs.mkdir(path.dirname(creds), { recursive: true });
+    await fs.writeFile(creds, JSON.stringify({
+      claudeAiOauth: { accessToken: access, refreshToken: `refresh-${access}`, subscriptionType: "max" },
+    }));
+    await fs.writeFile(path.join(home!, ".claude.json"), JSON.stringify({
+      theme: "dark",
+      oauthAccount: { emailAddress: email, accountUuid: uuid },
+    }));
+  }
+
+  function threadsFor(providerId: string, detail: string) {
+    return {
+      get: vi.fn(async () => ({ providerId })),
+      stop: vi.fn(async () => undefined),
+      retry: vi.fn(async () => undefined),
+      events: { list: vi.fn(async () => [{ data: { detail } }]) },
+    };
+  }
+
+  it("switches the Claude login after a 5-hour limit and retries the turn", async () => {
+    const threads = threadsFor(
+      "claude-code",
+      "You've hit your session limit. 5-hour limit reached. Resets in 3h12m.",
+    );
+    const harness = await host(threads);
+    await writeClaude("access-a", "uuid-a", "a@example.com");
+    await harness.behavior.callRpc("saveCurrent", { provider: "claude" });
+    await writeClaude("access-b", "uuid-b", "b@example.com");
+    await harness.behavior.callRpc("saveCurrent", { provider: "claude" });
+    await writeClaude("access-a", "uuid-a", "a@example.com");
+    await harness.behavior.emitThreadEvent("turn.failed", makeTurnFailedEvent({ threadId: "thr_limit" }));
+    const creds = JSON.parse(await fs.readFile(path.join(home!, ".claude/.credentials.json"), "utf8"));
+    const profile = JSON.parse(await fs.readFile(path.join(home!, ".claude.json"), "utf8"));
+    expect(creds.claudeAiOauth.accessToken).toBe("access-b");
+    expect(profile).toMatchObject({ theme: "dark", oauthAccount: { accountUuid: "uuid-b", emailAddress: "b@example.com" } });
+    expect(threads.retry).toHaveBeenCalledWith(expect.objectContaining({
+      threadId: "thr_limit",
+      reason: expect.stringContaining("Continuing on b"),
+    }));
+    expect(threads.stop).toHaveBeenCalled();
+  });
+
+  it("does not switch Claude on a disabled pooler error or an auth failure", async () => {
+    for (const detail of [
+      'API Error: 503 {"ok":false,"error":"plugin \\"account-pool\\" is not running (status: disabled)"}.',
+      "HTTP 401 unauthorized",
+    ]) {
+      const threads = threadsFor("claude-code", detail);
+      const harness = await host(threads);
+      await writeClaude("access-a", "uuid-a", "a@example.com");
+      await harness.behavior.callRpc("saveCurrent", { provider: "claude" });
+      await harness.behavior.emitThreadEvent("turn.failed", makeTurnFailedEvent({ threadId: "thr_keep" }));
+      const creds = JSON.parse(await fs.readFile(path.join(home!, ".claude/.credentials.json"), "utf8"));
+      expect(creds.claudeAiOauth.accessToken).toBe("access-a");
+      expect(threads.retry).not.toHaveBeenCalled();
+      await dispose?.();
+      await fs.rm(home!, { recursive: true, force: true });
+      home = undefined;
+    }
+  });
+
+  it("names the earliest reset when every Claude login is out of quota", async () => {
+    const threads = threadsFor(
+      "claude-code",
+      "You've hit your weekly limit. Resets at 2027-01-01T00:00:00.000Z.",
+    );
+    const harness = await host(threads);
+    await writeClaude("access-a", "uuid-a", "only@example.com");
+    await harness.behavior.callRpc("saveCurrent", { provider: "claude" });
+    await harness.behavior.emitThreadEvent("turn.failed", makeTurnFailedEvent({ threadId: "thr_wait" }));
+    expect(threads.retry).toHaveBeenCalledWith(expect.objectContaining({
+      reason: expect.stringContaining("2027-01-01T00:00:00.000Z"),
+    }));
+    const creds = JSON.parse(await fs.readFile(path.join(home!, ".claude/.credentials.json"), "utf8"));
+    expect(creds.claudeAiOauth.accessToken).toBe("access-a");
+  });
+
+  it("switches Codex on a usage limit and ignores the pooler route error", async () => {
+    const threads = threadsFor("codex", "You've hit your usage limit. Try again in 44m.");
+    const harness = await host(threads);
+    const auth = path.join(home!, ".codex/auth.json");
+    await fs.mkdir(path.dirname(auth), { recursive: true });
+    const body = (access: string, accountId: string, email: string) => JSON.stringify({
+      tokens: {
+        access_token: access,
+        refresh_token: `refresh-${access}`,
+        account_id: accountId,
+        id_token: `h.${Buffer.from(JSON.stringify({
+          email,
+          "https://api.openai.com/auth": { chatgpt_account_id: accountId },
+        })).toString("base64url")}.s`,
+      },
+    });
+    await fs.writeFile(auth, body("codex-a", "org-a", "a@example.com"));
+    await harness.behavior.callRpc("saveCurrent", { provider: "codex" });
+    await fs.writeFile(auth, body("codex-b", "org-b", "b@example.com"));
+    await harness.behavior.callRpc("saveCurrent", { provider: "codex" });
+    await fs.writeFile(auth, body("codex-a", "org-a", "a@example.com"));
+    await harness.behavior.emitThreadEvent("turn.failed", makeTurnFailedEvent({ threadId: "thr_codex" }));
+    const saved = JSON.parse(await fs.readFile(auth, "utf8"));
+    expect(saved.tokens.access_token).toBe("codex-b");
+    expect(threads.retry).toHaveBeenCalled();
+
+    threads.events.list.mockResolvedValue([{ data: { detail:
+      "unexpected status 503 Service Unavailable, url: http://127.0.0.1:9/api/v1/plugins/account-pool/http/v1/responses" } }]);
+    threads.retry.mockClear();
+    await fs.writeFile(auth, body("codex-a", "org-a", "a@example.com"));
+    await harness.behavior.emitThreadEvent("turn.failed", makeTurnFailedEvent({ threadId: "thr_codex", attemptNumber: 2 }));
+    expect(JSON.parse(await fs.readFile(auth, "utf8")).tokens.access_token).toBe("codex-a");
+    expect(threads.retry).not.toHaveBeenCalled();
+  });
+
+  it("clears the pooler route and copies only enabled saved logins", async () => {
+    home = await fs.mkdtemp(path.join(os.tmpdir(), "direct-import-"));
+    vi.spyOn(os, "homedir").mockReturnValue(home);
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({})));
+    const dataDir = path.join(home, ".bb");
+    const secretDir = path.join(dataDir, "plugins/account-pool/secrets/accounts");
+    await fs.mkdir(secretDir, { recursive: true });
+    await fs.writeFile(path.join(secretDir, "account-on.json"), JSON.stringify({
+      kind: "oauth", accessToken: "imported-access", refreshToken: "imported-refresh", expiresAt: Date.now() + 3_600_000,
+    }));
+    const db = new DatabaseSync(path.join(dataDir, "bb.db"));
+    db.exec("CREATE TABLE plugin_kv (plugin_id TEXT, key TEXT, value TEXT, updated_at INTEGER)");
+    db.prepare("INSERT INTO plugin_kv (plugin_id, key, value, updated_at) VALUES (?, ?, ?, ?)").run(
+      "account-pool",
+      "accounts:v1",
+      JSON.stringify([
+        { id: "on", provider: "claude", kind: "oauth", label: "On", email: "on@example.com", enabled: true, priority: 1, subscriptionType: "max", rateLimitTier: null, accountUuid: "uuid-on", codexAccountId: null },
+        { id: "off", provider: "claude", kind: "oauth", label: "Off", email: "off@example.com", enabled: false, priority: 2, subscriptionType: null, rateLimitTier: null, accountUuid: "uuid-off", codexAccountId: null },
+      ]),
+      Date.now(),
+    );
+    db.close();
+    await fs.mkdir(path.dirname(path.join(dataDir, "plugins/account-pool/data.db")), { recursive: true });
+    const active = new DatabaseSync(path.join(dataDir, "plugins/account-pool/data.db"));
+    active.exec("CREATE TABLE pool_active_account (provider TEXT, account_id TEXT)");
+    active.prepare("INSERT INTO pool_active_account (provider, account_id) VALUES (?, ?)").run("claude", "on");
+    active.close();
+    await writeClaude("live-access", "uuid-live", "live@example.com");
+    const created = createFakePluginHost({
+      pluginId: "subscription-accounts",
+      dataDir,
+      sdk: { plugins: { list: async () => [] } },
+    });
+    dispose = () => created.harness.lifecycle.dispose();
+    await plugin(created.bb);
+    const creds = JSON.parse(await fs.readFile(path.join(home, ".claude/.credentials.json"), "utf8"));
+    expect(creds.claudeAiOauth.accessToken).toBe("live-access");
+    const overview = await created.harness.behavior.callRpc("overview", null) as {
+      swap: { id: string; active: string | null; accounts: { name: string; email: string | null }[] }[];
+    };
+    const claude = overview.swap.find((section) => section.id === "claude");
+    expect(claude?.accounts.map((account) => account.email).sort()).toEqual(["live@example.com", "on@example.com"]);
+    expect(claude?.active).toBe("live");
+    expect(JSON.stringify(overview)).not.toContain("imported-access");
+    const env = await created.harness.behavior.resolveProviderEnv("claude-code", {
+      threadId: "t", projectId: "p", hostId: "h",
+    });
+    expect(env.map((entry) => entry.name)).toEqual(["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"]);
+    expect(env.every((entry) => entry.value === "")).toBe(true);
+    expect(JSON.stringify(env)).not.toMatch(/account-pool/i);
+    const codexEnv = await created.harness.behavior.resolveProviderEnv("codex", {
+      threadId: "t", projectId: "p", hostId: "h",
+    });
+    expect(codexEnv.map((entry) => entry.name)).toEqual(["CODEX_OPENAI_BASE_URL", "CODEX_POOL_AUTH_TOKEN"]);
+    await expect(created.harness.behavior.callRpc("poolEnable", null)).rejects.toThrow(/Account Pooler/);
+    await expect(created.harness.behavior.callRpc("loginStart", { provider: "claude" })).rejects.toThrow(/CLI/);
+    const reloaded = await created.harness.lifecycle.reload(plugin);
+    dispose = () => reloaded.harness.lifecycle.dispose();
+    const again = await reloaded.harness.behavior.callRpc("overview", null) as typeof overview;
+    expect(again.swap.find((section) => section.id === "claude")?.accounts).toHaveLength(2);
   });
 });
