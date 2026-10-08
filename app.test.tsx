@@ -69,6 +69,52 @@ const ready: AccountUsage = {
 };
 
 describe("subscription usage page", () => {
+  it("offers account-specific re-login instead of duplicate expired-login errors", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const loginStart = vi.fn(async () => ({
+      id: "relogin", provider: "antigravity", targetAccount: "test-account",
+      status: "waiting", url: "https://accounts.google.com/test", userCode: null,
+      needsCode: true, expiresAt: now + 58_000, error: null, account: null,
+    }));
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, {
+      rpc: {
+        overview: () => fixture({ ...emptyUsage(), status: "error", error: "Antigravity login expired. Refresh the CLI login or configure its OAuth client in plugin settings." }),
+        loginStart,
+      },
+    });
+    const action = await slot.findByRole("button", { name: "Log in again for test-account" });
+    expect(slot.getByText("Login expired. Log in again to load usage.")).toBeTruthy();
+    expect(slot.queryByText(/Usage could not be loaded/)).toBeNull();
+    expect(slot.queryByText(/configure its OAuth client/)).toBeNull();
+    fireEvent.click(action);
+    await waitFor(() => expect(loginStart).toHaveBeenCalledWith({ provider: "antigravity", name: "test-account" }));
+    expect(await slot.findByText("Log in again for test-account")).toBeTruthy();
+    expect(slot.getByText(/Open the sign-in page/).textContent).toContain("test@example.com");
+    slot.lifecycle.unmount();
+  });
+
+  it("shows sign-in start failures inline and reports cancellation after retry", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const loginStart = vi.fn().mockRejectedValueOnce(new Error("The CLI is not installed.")).mockResolvedValueOnce({
+      id: "retry", provider: "antigravity", targetAccount: "test-account", status: "waiting",
+      url: "https://accounts.google.com/test", userCode: null, needsCode: true,
+      expiresAt: now + 58_000, error: null, account: null,
+    });
+    const loginCancel = vi.fn(async () => null);
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, {
+      rpc: { overview: () => fixture(ready), loginStart, loginCancel },
+    });
+    fireEvent.click(await slot.findByRole("button", { name: "Log in again for test-account" }));
+    expect((await slot.findByRole("alert")).textContent).toBe("The CLI is not installed.");
+    fireEvent.click(slot.getByRole("button", { name: "Try again" }));
+    await slot.findByRole("link", { name: "Open sign-in page" });
+    fireEvent.click(slot.getByRole("button", { name: "Cancel" }));
+    expect(await slot.findByText("Sign-in cancelled. Your saved accounts were kept.")).toBeTruthy();
+    expect(loginCancel).toHaveBeenCalledTimes(1);
+    expect(slot.getByRole("button", { name: "Log in again for test-account" })).toBeTruthy();
+    slot.lifecycle.unmount();
+  });
+
   it.each(["codex", "claude"] as const)("switches the %s machine account independently of account routing", async (provider) => {
     const app = await loadPluginApp(() => import("./app"));
     const view = fixture(ready);

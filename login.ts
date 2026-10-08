@@ -18,6 +18,7 @@ export type LoginStatus = "starting" | "waiting" | "verifying" | "done" | "faile
 export interface LoginState {
   id: string;
   provider: string;
+  targetAccount: string | null;
   status: LoginStatus;
   url: string | null;
   /** Device code to confirm in the browser (Grok, Codex). */
@@ -73,10 +74,12 @@ export class LoginSession {
     private readonly tokenPath: string,
     private readonly onChange: () => void,
     private readonly onToken: (tokenFile: string, home: string) => Promise<string>,
+    targetAccount: string | null = null,
   ) {
     this.state = {
       id: path.basename(home),
       provider,
+      targetAccount,
       status: "starting",
       url: null,
       userCode: null,
@@ -174,6 +177,7 @@ export class LoginSession {
         if (/refresh_?token/i.test(body)) {
           // Let the CLI finish its write before reading it for real.
           await new Promise((resolve) => setTimeout(resolve, 500));
+          if (this.finished) return;
           this.state.status = "verifying";
           this.onChange();
           try {
@@ -182,6 +186,7 @@ export class LoginSession {
             this.fail((error as Error).message);
             return;
           }
+          if (this.finished) return;
           this.state.status = "done";
           this.finish();
           return;

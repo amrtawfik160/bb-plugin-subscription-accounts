@@ -22,6 +22,7 @@ afterEach(async () => {
   dispose = undefined;
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   if (home) await fs.rm(home, { recursive: true, force: true });
 });
 
@@ -43,6 +44,91 @@ async function setup(plugins = { list: async () => [] } as any) {
 }
 
 describe("subscription usage RPC", () => {
+  it("lists current quota through the CLI, refreshes on request, and keeps unavailable quota unknown", async () => {
+    const fetcher = vi.fn(async () => Response.json(billing));
+    vi.stubGlobal("fetch", fetcher);
+    const { harness } = await setup();
+    const result = await harness.behavior.runCli(["quota", "grok", "--json"]);
+    expect(result.exitCode).toBe(0);
+    const report = JSON.parse(result.stdout!);
+    expect(report.accounts).toMatchObject([{ provider: "grok", account: "test", email: "test@example.com", active: true, status: "ready", limits: [{ label: "Weekly pool", remaining: 60, unit: "percent" }] }]);
+    expect(report.catalogs).toEqual([{ provider: "grok", status: "unknown", models: [] }]);
+    expect(result.stdout).not.toMatch(/test-access|test-refresh/);
+    fetcher.mockImplementation(async () => new Response("down", { status: 503 }));
+    const failed = await harness.behavior.runCli(["quota", "grok", "--refresh", "--json"]);
+    expect(JSON.parse(failed.stdout!).accounts[0]).toMatchObject({ status: "error", limits: [{ remaining: null, lastKnownRemaining: 60 }] });
+    expect((await harness.behavior.runCli(["quota", "grok"])).stdout).toContain("Weekly pool [account]: unknown left.");
+    expect((await harness.behavior.runCli(["quota", "grok", "--refreh"])).exitCode).toBe(1);
+  });
+
+  async function fakeGrokLogin(body: string) {
+    const bin = path.join(home!, "fake-bin");
+    await fs.mkdir(bin, { recursive: true });
+    const executable = path.join(bin, "grok");
+    await fs.writeFile(executable, `#!/bin/sh
+printf '%s\\n' 'https://accounts.x.ai/test' 'ABCD-1234'
+sleep 0.2
+mkdir -p "$HOME/.grok"
+printf '%s' '${body}' > "$HOME/.grok/auth.json"
+sleep 5
+`, { mode: 0o700 });
+    vi.stubEnv("PATH", `${bin}:/usr/bin:/bin`);
+  }
+
+  it.each([true, false])("relogs the same saved account while preserving order and active selection (active: %s)", async (active) => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(billing)));
+    const { file, harness } = await setup();
+    await fs.writeFile(file, savedLogin.replaceAll("test@", "other@"));
+    await harness.behavior.callRpc("saveCurrent", { provider: "grok" });
+    await harness.behavior.callRpc("use", { provider: "grok", name: active ? "test" : "other" });
+    const fresh = savedLogin.replace("test-access", "fresh-access").replace("test-refresh", "fresh-refresh");
+    await fakeGrokLogin(fresh);
+    const started = await harness.behavior.callRpc("loginStart", { provider: "grok", name: "test" });
+    expect(started).toMatchObject({ provider: "grok", targetAccount: "test" });
+    await vi.waitFor(async () => {
+      const overview: any = await harness.behavior.callRpc("overview", null);
+      expect(overview.login).toMatchObject({ status: "done", account: "test", targetAccount: "test" });
+      const section = overview.swap.find((s: any) => s.id === "grok");
+      expect(section.active).toBe(active ? "test" : "other");
+      expect(section.accounts.map((a: any) => a.name)).toEqual(["test", "other"]);
+      expect(section.accounts[0].usage).toMatchObject({ status: "ready" });
+      expect(JSON.stringify(overview)).not.toContain("fresh-refresh");
+    }, { timeout: 8_000 });
+    expect(await fs.readFile(file, "utf8")).toBe(active ? fresh : savedLogin.replaceAll("test@", "other@"));
+    await harness.behavior.callRpc("use", { provider: "grok", name: "test" });
+    expect(await fs.readFile(file, "utf8")).toBe(fresh);
+  });
+
+  it("rejects a different login without replacing the saved account", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(billing)));
+    const { file, harness } = await setup();
+    await fakeGrokLogin(savedLogin.replaceAll("test@", "wrong@"));
+    await harness.behavior.callRpc("loginStart", { provider: "grok", name: "test" });
+    await vi.waitFor(async () => {
+      const overview: any = await harness.behavior.callRpc("overview", null);
+      expect(overview.login).toMatchObject({ status: "failed", error: "Sign in with test@example.com. Your saved login was kept." });
+      expect(overview.swap.find((s: any) => s.id === "grok").accounts.map((a: any) => a.name)).toEqual(["test"]);
+    }, { timeout: 8_000 });
+    expect(await fs.readFile(file, "utf8")).toBe(savedLogin);
+    await harness.behavior.callRpc("use", { provider: "grok", name: "test" });
+    expect(await fs.readFile(file, "utf8")).toBe(savedLogin);
+  });
+
+  it("keeps saved credentials when a re-login is cancelled and prevents competing sessions", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(billing)));
+    const { file, harness } = await setup();
+    await fakeGrokLogin(savedLogin.replace("test-access", "fresh-access"));
+    await harness.behavior.callRpc("loginStart", { provider: "grok", name: "test" });
+    await expect(harness.behavior.callRpc("loginStart", { provider: "grok" })).rejects.toThrow("Finish or cancel");
+    await harness.behavior.callRpc("loginCancel", null);
+    await new Promise((resolve) => setTimeout(resolve, 1_600));
+    const overview: any = await harness.behavior.callRpc("overview", null);
+    expect(overview.login).toBeNull();
+    expect(await fs.readFile(file, "utf8")).toBe(savedLogin);
+    await harness.behavior.callRpc("use", { provider: "grok", name: "test" });
+    expect(await fs.readFile(file, "utf8")).toBe(savedLogin);
+  });
+
   it.each([
     ["codex", true], ["claude", true], ["codex", false], ["claude", false],
   ] as const)("switches the %s machine login and preserves its previous login (saved: %s)", async (provider, saved) => {

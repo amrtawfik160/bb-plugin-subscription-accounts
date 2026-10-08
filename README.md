@@ -111,6 +111,7 @@ The page covers everything. For scripts and agents there is `bb subs`:
 ```sh
 bb subs list [<provider>] [--json]         # every account and its quota state
 bb subs add <provider> [<name>]            # save the login the CLI is using now
+bb subs quota [<provider>] [--refresh] [--json] # current quota and available models
 bb subs add <provider> [<name>] --from <login-file> [--force]
 bb subs use <provider> <name>              # switch now
 bb subs next <provider>                    # mark the active account used up, switch

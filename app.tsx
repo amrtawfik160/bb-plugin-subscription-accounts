@@ -63,7 +63,9 @@ interface PoolAccount {
   canUseMachine?: boolean;
 }
 interface Login {
+  id: string;
   provider: string;
+  targetAccount: string | null;
   status: "starting" | "waiting" | "verifying" | "done" | "failed";
   url: string | null;
   userCode: string | null;
@@ -365,12 +367,14 @@ function UsageDetails({
   onRefresh,
   name,
   showExtraUsage = false,
+  actions,
 }: {
   usage: AccountUsage;
   now: number;
   onRefresh: () => Promise<unknown>;
   name: string;
   showExtraUsage?: boolean;
+  actions?: ReactNode;
 }) {
   const [pending, setPending] = useState(false);
   const refresh = async () => {
@@ -383,6 +387,7 @@ function UsageDetails({
   };
   const stale =
     usage.fetchedAt !== null && (now - usage.fetchedAt >= USAGE_TTL_MS || usage.status === "error");
+  const loginExpired = Boolean(actions && usage.error && /sign in again|login expired|session expired|access expired/i.test(usage.error));
   return (
     <div className="space-y-3 pt-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -410,13 +415,14 @@ function UsageDetails({
           Refresh
         </Button>
       </div>
+      {actions}
       {usage.metrics.length > 0 ? (
         <div className="grid grid-cols-1 gap-x-6 gap-y-4 sm:grid-cols-2">
           {usage.metrics.map((row) => (
             <QuotaMeter key={row.label} row={row} now={now} />
           ))}
         </div>
-      ) : (
+      ) : !usage.error ? (
         <p role="status" className="text-xs text-muted-foreground">
           {usage.status === "loading"
             ? "Fetching subscription usage…"
@@ -424,7 +430,7 @@ function UsageDetails({
               ? "The provider did not report usage for this account. Refresh to check again."
               : "Usage could not be loaded. Refresh to retry."}
         </p>
-      )}
+      ) : null}
       {showExtraUsage &&
       usage.status === "ready" &&
       !usage.metrics.some((row) => row.label === "Extra usage") ? (
@@ -434,7 +440,7 @@ function UsageDetails({
       ) : null}
       {usage.error ? (
         <p role="status" className="break-words text-xs text-destructive">
-          {usage.error}
+          {loginExpired ? "Login expired. Log in again to load usage." : usage.error}
           {usage.metrics.length > 0 ? " Showing the last successful reading." : ""}
         </p>
       ) : null}
@@ -455,6 +461,7 @@ function SignIn({
   run,
   disabled,
   children,
+  account,
 }: {
   provider: ProviderId;
   label: string;
@@ -463,80 +470,111 @@ function SignIn({
   run: Run;
   disabled?: boolean;
   children?: ReactNode;
+  account?: SwapAccount;
 }) {
-  const [open, setOpen] = useState(false);
+  const [attempt, setAttempt] = useState<
+    | { kind: "closed" }
+    | { kind: "starting" }
+    | { kind: "open"; login: Login }
+    | { kind: "failed"; error: string }
+    | { kind: "cancelled" }
+  >({ kind: "closed" });
   const [code, setCode] = useState("");
-  const mine = login && login.provider === provider ? login : null;
-  const status = mine?.status ?? null;
+  const matches = login?.provider === provider && (login.targetAccount ?? null) === (account?.name ?? null);
+  const busy = login && !["done", "failed"].includes(login.status);
+  const mine = attempt.kind === "open"
+    ? matches && login.id === attempt.login.id ? login : attempt.login
+    : matches && busy && attempt.kind === "closed" ? login : null;
+  const status = attempt.kind === "starting" ? "starting" : attempt.kind === "failed" ? "failed" : mine?.status ?? null;
+  const open = mine !== null || (attempt.kind !== "closed" && attempt.kind !== "cancelled");
   const waiting = status === "waiting";
   const now = useNow(1_000, waiting);
   const left = mine?.expiresAt ? Math.max(0, mine.expiresAt - now) : 0;
 
   useEffect(() => {
     if (status === "done" && open) {
-      toast.success(`Added ${mine?.account ?? "account"}`);
-      setOpen(false);
+      toast.success(account ? `Logged in again for ${account.name}` : `Added ${mine?.account ?? "account"}`);
+      setAttempt({ kind: "closed" });
       setCode("");
     }
-  }, [status, open, mine?.account]);
+  }, [status, open, mine?.account, account?.name]);
 
   const start = () => {
-    setOpen(true);
+    setAttempt({ kind: "starting" });
     setCode("");
-    void run(() => rpc.call("loginStart", { provider }));
+    void run(async () => {
+      try {
+        const next = await rpc.call("loginStart", account ? { provider, name: account.name } : { provider });
+        setAttempt({ kind: "open", login: next });
+      } catch (cause) {
+        setAttempt({ kind: "failed", error: message(cause) });
+        throw cause;
+      }
+    });
   };
   const cancel = () => {
-    setOpen(false);
-    void run(() => rpc.call("loginCancel"));
+    void run(async () => {
+      if (mine) await rpc.call("loginCancel");
+      setAttempt({ kind: "cancelled" });
+      setCode("");
+    });
   };
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (code.trim()) void run(() => rpc.call("loginSubmit", { code }));
   };
 
-  if (!open || !mine || status === "done") {
+  if (!open || status === "done") {
     return (
       <div className="flex flex-wrap items-center gap-2">
-        <Button onClick={start} disabled={disabled}>
-          <Icon name="Plus" className="size-4" />
-          Add {label} account
+        <Button
+          onClick={start}
+          disabled={disabled || Boolean(busy)}
+          variant={account ? "outline" : "default"}
+          size={account ? "sm" : "default"}
+          className="min-h-11 sm:min-h-8"
+          aria-label={account ? `Log in again for ${account.name}` : undefined}
+        >
+          <Icon name={account ? "RotateCcw" : "Plus"} className="size-4" />
+          {account ? "Log in again" : `Add ${label} account`}
         </Button>
+        {attempt.kind === "cancelled" ? <p role="status" className="text-xs text-muted-foreground">Sign-in cancelled. Your saved accounts were kept.</p> : null}
         {children}
       </div>
     );
   }
 
   return (
-    <div className="space-y-4 rounded-lg border border-border bg-card p-4">
-      <div className="flex items-center justify-between gap-4">
-        <h3 className="font-medium">Add a {label} account</h3>
-        <Button size="sm" variant="ghost" onClick={cancel}>
+    <div className="w-full min-w-0 space-y-4 rounded-lg border border-border bg-card p-4" aria-busy={status === "starting" || status === "verifying"}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="min-w-0 break-words font-medium">{account ? `Log in again for ${account.name}` : `Add a ${label} account`}</h3>
+        <Button size="sm" variant="ghost" className="min-h-11 sm:min-h-8" onClick={cancel} disabled={status === "starting" || status === "verifying"}>
           Cancel
         </Button>
       </div>
 
       {status === "starting" ? (
-        <p className="text-sm text-muted-foreground">Getting a sign-in link…</p>
+        <p role="status" className="text-sm text-muted-foreground">Getting a sign-in link…</p>
       ) : null}
 
       {status === "failed" ? (
         <div className="flex flex-wrap items-center gap-3">
-          <p className="text-sm text-destructive">{mine.error}</p>
-          <Button size="sm" onClick={start}>
+          <p role="alert" className="break-words text-sm text-destructive">{attempt.kind === "failed" ? attempt.error : mine?.error}</p>
+          <Button size="sm" className="min-h-11 sm:min-h-8" onClick={start} disabled={Boolean(busy)}>
             Try again
           </Button>
         </div>
       ) : null}
 
-      {waiting || status === "verifying" ? (
+      {mine && (waiting || status === "verifying") ? (
         <ol className="space-y-4 text-sm">
           <li className="space-y-2">
             <p>
-              <span className="font-medium">1.</span> Open the sign-in page and sign in with the account you
-              want to add.
+              <span className="font-medium">1.</span> Open the sign-in page and sign in with{" "}
+              {account ? <span className="break-all font-medium">{account.email ?? account.name}</span> : "the account you want to add"}.
             </p>
             <div className="flex flex-wrap items-center gap-3">
-              <Button asChild size="sm" variant="outline">
+              <Button asChild size="sm" variant="outline" className="min-h-11 sm:min-h-8">
                 <a href={mine.url ?? "#"} target="_blank" rel="noreferrer">
                   <Icon name="ExternalLink" className="size-3.5" />
                   Open sign-in page
@@ -557,7 +595,7 @@ function SignIn({
               <p>
                 <span className="font-medium">2.</span> Copy the code the page shows and paste it here.
               </p>
-              <form onSubmit={submit} className="flex items-center gap-2">
+              <form onSubmit={submit} className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
                 <Input
                   autoFocus
                   value={code}
@@ -565,16 +603,16 @@ function SignIn({
                   placeholder="Authorization code"
                   aria-label="Authorization code"
                   disabled={!waiting}
-                  className="font-mono"
+                  className="min-w-0 flex-1 basis-full font-mono sm:basis-auto"
                 />
-                <Button type="submit" disabled={!waiting || !code.trim()}>
-                  {status === "verifying" ? "Signing in…" : "Add"}
+                <Button type="submit" className="min-h-11 sm:min-h-8" disabled={!waiting || !code.trim()}>
+                  {status === "verifying" ? "Signing in…" : account ? "Log in again" : "Add"}
                 </Button>
               </form>
             </li>
           ) : (
             <li>
-              <p className="text-muted-foreground">
+              <p role="status" className="text-muted-foreground">
                 {status === "verifying"
                   ? "Saving the login…"
                   : "Waiting for you to finish in the browser. This updates by itself."}
@@ -694,7 +732,7 @@ function SwapTab({ section, data, rpc, run }: { section: SwapSection; data: Over
                       {!account.active && !out ? "Ready" : null}
                     </span>
                   </div>
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex flex-wrap items-center gap-1.5">
                     {out ? (
                       <Button
                         size="sm"
@@ -741,6 +779,9 @@ function SwapTab({ section, data, rpc, run }: { section: SwapSection; data: Over
                     now={now}
                     name={account.name}
                     onRefresh={() => run(() => rpc.call("usageRefresh", target(account.name)))}
+                    actions={section.id !== "claude" && section.id !== "codex" ? (
+                      <SignIn provider={section.id} label={section.label} account={account} login={data.login} rpc={rpc} run={run} disabled={!section.installed} />
+                    ) : undefined}
                   />
                 </div>
               </li>

@@ -112,7 +112,7 @@ describe("provider quota normalization", () => {
     ]);
   });
 
-  it("accepts Grok proto-JSON zero but refuses malformed periods and monthly-as-weekly quotas", () => {
+  it("accepts reported Grok zero but keeps missing quota unknown and refuses malformed periods", () => {
     const config = {
       currentPeriod: {
         type: "USAGE_PERIOD_TYPE_WEEKLY",
@@ -120,11 +120,13 @@ describe("provider quota normalization", () => {
         end: "2026-09-08",
       },
     };
-    expect(mapGrok({ config })).toMatchObject([{ label: "Weekly pool", used: 0, remaining: 100 }]);
+    expect(mapGrok({ config: { ...config, creditUsagePercent: 0 } })).toMatchObject([{ label: "Weekly pool", used: 0, remaining: 100 }]);
+    expect(() => mapGrok({ config })).toThrow(UsageError);
     expect(
       mapGrok({
         config: {
           ...config,
+          creditUsagePercent: 0,
           currentPeriod: {
             ...config.currentPeriod,
             type: "USAGE_PERIOD_TYPE_MONTHLY",

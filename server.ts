@@ -58,6 +58,7 @@ import { HistoryCache } from "./history.js";
 import { sqliteHistoryStore } from "./history-store.js";
 import { PricingStore } from "./pricing.js";
 import { historySchema } from "./history-schema.js";
+import { quotaAccount, renderQuotas, type ModelCatalog, type QuotaAccount, type QuotaReport } from "./quotas.js";
 import {
   type PoolProviderId,
   SWAP_IDS,
@@ -101,6 +102,7 @@ const swapAccountSchema = z.object({
 const loginSchema = z.object({
   id: z.string(),
   provider: z.string(),
+  targetAccount: z.string().nullable(),
   status: z.enum(["starting", "waiting", "verifying", "done", "failed"]),
   url: z.string().nullable(),
   userCode: z.string().nullable(),
@@ -192,7 +194,7 @@ export const rpcContract = defineRpcContract({
     output: z.object({ name: z.string() }),
   },
   loginStart: {
-    input: z.object({ provider: anyProviderSchema }),
+    input: z.object({ provider: anyProviderSchema, name: z.string().optional() }),
     output: loginSchema,
   },
   loginSubmit: { input: z.object({ code: z.string() }), output: loginSchema },
@@ -709,6 +711,7 @@ export default async function plugin(bb: BbPluginApi) {
     login = {
       id: `${provider}-${Date.now()}`,
       provider,
+      targetAccount: null,
       status: "starting",
       url: null,
       userCode: null,
@@ -728,37 +731,66 @@ export default async function plugin(bb: BbPluginApi) {
     changed();
   }
 
-  async function startLogin(provider: z.infer<typeof anyProviderSchema>): Promise<LoginState> {
-    stopLogins();
-    if (isSwapId(provider)) {
-      const spec = SWAP_PROVIDERS[provider];
-      const binary = await findBinary(spec.login.binary);
-      if (!binary) throw new Error(`${spec.login.binary} is not installed on this machine.`);
-      const home = path.join(stagingRoot(), `${provider}-${Date.now()}`);
-      const session = new LoginSession(
-        provider,
-        spec.login,
-        home,
-        spec.tokenPath,
-        () => {
-          if (swapLogin === session) {
-            login = { ...session.state };
-            changed();
-          }
-        },
-        async (tokenFile, sessionHome) =>
-          addAccount(fileLoginFor(spec.id), undefined, await fs.readFile(tokenFile, "utf8"), {
-            makeActive: true,
-            home: sessionHome,
-          }),
-      );
-      swapLogin = session;
-      login = { ...session.state };
-      await session.start(binary);
-      return login;
-    }
+  async function startLogin(provider: z.infer<typeof anyProviderSchema>, name?: string): Promise<LoginState> {
+    return serialized(async () => {
+      if (swapLogin?.active) throw new Error("Finish or cancel the current sign-in first.");
+      if (isSwapId(provider)) {
+        const spec = SWAP_PROVIDERS[provider];
+        const expected = name === undefined ? null : { ...requireAccount(await loadPool(provider), name) };
+        const binary = await findBinary(spec.login.binary);
+        if (!binary) throw new Error(`${spec.login.binary} is not installed on this machine.`);
+        const home = path.join(stagingRoot(), `${provider}-${Date.now()}`);
+        const session = new LoginSession(
+          provider,
+          spec.login,
+          home,
+          spec.tokenPath,
+          () => {
+            if (swapLogin === session) {
+              login = { ...session.state };
+              changed();
+            }
+          },
+          async (tokenFile, sessionHome) => {
+            const body = await fs.readFile(tokenFile, "utf8");
+            const fileLogin = fileLoginFor(spec.id);
+            if (!expected) return addAccount(fileLogin, undefined, body, { makeActive: true, home: sessionHome });
+            const identity = fileLogin.identify(body);
+            const email = identity.email ?? await whoami(spec, sessionHome);
+            const saved = await mutate(provider, async (state) => {
+              const meta = requireAccount(state, expected.name);
+              if (!session.active) throw new Error("Sign-in cancelled. Your saved login was kept.");
+              if (meta.addedAt !== expected.addedAt || meta.key !== expected.key) {
+                throw new Error("This saved account changed during sign-in. Try again.");
+              }
+              const matchingEmail = provider !== "cursor" && meta.email && email && meta.email.toLowerCase() === email.toLowerCase();
+              if (identity.key !== meta.key && !matchingEmail) {
+                throw new Error(`Sign in with ${meta.email ?? meta.name}. Your saved login was kept.`);
+              }
+              const previous = readToken(provider, meta.name);
+              if (state.active === meta.name && previous && await readLiveRaw(fileLogin) === previous) {
+                await replaceLoginFiles([{ path: loginFile(fileLogin), before: previous, after: body }]);
+              }
+              writeToken(provider, meta.name, body);
+              meta.key = identity.key;
+              meta.email = email ?? meta.email;
+              meta.lastError = null;
+              usage.remove(usageKey(provider, meta.name));
+              return meta.name;
+            });
+            await refreshUsage(provider, saved, true, { syncLive: false });
+            return saved;
+          },
+          expected?.name ?? null,
+        );
+        swapLogin = session;
+        login = { ...session.state };
+        await session.start(binary);
+        return login;
+      }
 
-    throw new Error("Sign in with the CLI, then Save it.");
+      throw new Error("Sign in with the CLI, then Save it.");
+    });
   }
 
   async function submitLogin(code: string): Promise<LoginState> {
@@ -900,7 +932,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   // ── page RPC ─────────────────────────────────────────────────────────────
 
-  function refreshUsage(provider: StackId, name: string, force = false) {
+  function refreshUsage(provider: StackId, name: string, force = false, options = { syncLive: true }) {
     const login = fileLoginFor(provider);
     if (provider === "claude" || provider === "codex") {
       return usage.refresh(
@@ -910,7 +942,7 @@ export default async function plugin(bb: BbPluginApi) {
           await serialized(async () => {
             const state = await loadPool(provider);
             requireAccount(state, name);
-            await syncActive(login, state);
+            if (options.syncLive) await syncActive(login, state);
             stored = readToken(provider, name);
           });
           if (!stored) throw new UsageError("No saved login. Add this account again.");
@@ -944,7 +976,7 @@ export default async function plugin(bb: BbPluginApi) {
         await serialized(async () => {
           const state = await loadPool(provider);
           requireAccount(state, name);
-          await syncActive(login, state);
+          if (options.syncLive) await syncActive(login, state);
           body = readToken(provider, name);
         });
         if (!body) throw new UsageError("No saved login. Add this account again.");
@@ -1285,7 +1317,7 @@ export default async function plugin(bb: BbPluginApi) {
     saveCurrent: async ({ provider }) => ({
       name: await saveCurrent(fileLoginFor(provider)),
     }),
-    loginStart: async ({ provider }) => startLogin(provider),
+    loginStart: async ({ provider, name }) => startLogin(provider, name),
     loginSubmit: async ({ code }) => submitLogin(code),
     loginCancel: async () => {
       stopLogins();
@@ -1376,6 +1408,11 @@ export default async function plugin(bb: BbPluginApi) {
         usage: "bb subs list [<provider>] [--json]",
       },
       {
+        name: "quota",
+        summary: "Show saved accounts' current quota and available models; unknown data stays unknown",
+        usage: "bb subs quota [<provider>] [--refresh] [--json]",
+      },
+      {
         name: "add",
         summary: "Save the login a CLI is using now (or a login file)",
         usage: `bb subs add <${stackList}> [<name>] [--from <file>] [--force]`,
@@ -1418,6 +1455,33 @@ export default async function plugin(bb: BbPluginApi) {
 
       try {
         switch (subcommand) {
+          case "quota": {
+            const unknownOption = argv.find((arg) => arg.startsWith("--") && arg !== "--json" && arg !== "--refresh");
+            if (unknownOption || rawName) throw new Error("Usage: bb subs quota [<provider>] [--refresh] [--json]");
+            const chosen = rawProvider ? stackIdSchema.safeParse(rawProvider) : null;
+            if (chosen && !chosen.success) throw new Error(`Provider must be one of ${stackList}.`);
+            const ids = chosen?.success ? [chosen.data] : STACK_IDS;
+            const accounts: QuotaAccount[] = [];
+            const catalogs: ModelCatalog[] = [];
+            for (const id of ids) {
+              const state = await loadPool(id);
+              for (const name of state.order) {
+                await refreshUsage(id, name, argv.includes("--refresh"));
+                const meta = state.accounts[name];
+                accounts.push(quotaAccount({ provider: id, account: name, email: meta.email, active: state.active === name }, usage.get(usageKey(id, name)), Date.now()));
+              }
+              if (!state.order.length) continue;
+              const providerId = isSwapId(id) ? SWAP_PROVIDERS[id].bbProviderIds[0] : id === "claude" ? "claude-code" : "codex";
+              try {
+                const catalog = await bb.sdk.providers.models({ providerId, signal: AbortSignal.any([usageController.signal, AbortSignal.timeout(15_000)]) });
+                catalogs.push({ provider: id, status: catalog.modelLoadError ? "unknown" : "ready", models: catalog.models.map((model) => ({ id: model.model, label: model.displayName })) });
+              } catch {
+                catalogs.push({ provider: id, status: "unknown", models: [] });
+              }
+            }
+            const report: QuotaReport = { now: Date.now(), accounts, catalogs };
+            return done(json ? JSON.stringify(report, null, 2) : renderQuotas(report));
+          }
           case "list": {
             const chosen = rawProvider ? stackIdSchema.safeParse(rawProvider) : null;
             if (chosen && !chosen.success) throw new Error(`Provider must be one of ${stackList}.`);
@@ -1482,7 +1546,7 @@ export default async function plugin(bb: BbPluginApi) {
           default:
             return {
               exitCode: 2,
-              stderr: `Unknown subcommand "${subcommand}".\nUsage: bb subs <list|add|use|next|reset|remove>\n`,
+              stderr: `Unknown subcommand "${subcommand}".\nUsage: bb subs <list|quota|add|use|next|reset|remove>\n`,
             };
         }
       } catch (error) {

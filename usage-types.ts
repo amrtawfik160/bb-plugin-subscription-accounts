@@ -8,6 +8,11 @@ export interface UsageMetric {
   unit: "percent" | "usd" | "requests" | "credits";
   resetAt: number | null;
   windowMs?: number;
+  scope?:
+    | { kind: "model"; model: string }
+    | { kind: "group"; group: string }
+    | { kind: "feature"; feature: string };
+  derivedFromModels?: boolean;
 }
 
 export interface AccountUsage {
@@ -17,10 +22,12 @@ export interface AccountUsage {
   fetchedAt: number | null;
   refreshing: boolean;
   error: string | null;
+  attemptedAt?: number;
+  modelQuotas?: UsageMetric[];
   history?: UsageHistory;
 }
 
-export type UsageData = Pick<AccountUsage, "plan" | "metrics" | "history">;
+export type UsageData = Pick<AccountUsage, "plan" | "metrics" | "history" | "modelQuotas">;
 
 export interface UsageTotals {
   tokens: number;
