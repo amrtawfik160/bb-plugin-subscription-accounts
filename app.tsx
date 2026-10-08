@@ -1,6 +1,6 @@
-// Subscription Accounts page: one tab per AI subscription. Antigravity, Cursor
-// and Grok accounts are swapped by this plugin; Claude and Codex accounts are
-// managed through bb's Account Pooler, shown here in the same layout.
+// Subscription Accounts page: one tab per AI subscription. Each provider swaps
+// its saved login file when quota runs out. Claude and Codex sign in through
+// their own CLIs, then this page saves that login.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
@@ -38,7 +38,7 @@ interface SwapAccount {
   usage: AccountUsage;
 }
 interface SwapSection {
-  id: SwapId;
+  id: ProviderId;
   label: string;
   installed: boolean;
   active: string | null;
@@ -749,19 +749,23 @@ function SwapTab({ section, data, rpc, run }: { section: SwapSection; data: Over
         </AccountList>
       </section>
 
-      <SignIn
-        provider={section.id}
-        label={section.label}
-        login={data.login}
-        rpc={rpc}
-        run={run}
-        disabled={!section.installed}
-      />
+      {section.id === "claude" || section.id === "codex" ? (
+        <p className="text-sm text-muted-foreground">Sign in with the CLI, then choose Save it.</p>
+      ) : (
+        <SignIn
+          provider={section.id}
+          label={section.label}
+          login={data.login}
+          rpc={rpc}
+          run={run}
+          disabled={!section.installed}
+        />
+      )}
     </div>
   );
 }
 
-// ── Claude / Codex through the Account Pooler ─────────────────────────────
+// ── Claude / Codex list from an already-on Account Pooler ─────────────────
 
 function PoolUsage({ account, now }: { account: PoolAccount; now: number }) {
   if (account.quotaMetrics) {
@@ -945,25 +949,14 @@ function PoolTab({ provider, data, rpc, run }: { provider: PoolId; data: Overvie
       .finally(() => setSwitching(null));
   };
 
-  if (!pool.installed) {
-    return (
-      <Notice tone="warn">
-        This bb does not include the Account Pooler plugin, which {label} accounts need.
-      </Notice>
-    );
-  }
-  if (!pool.enabled) {
+  if (!pool.installed || !pool.enabled) {
     return (
       <div className="space-y-5">
         <MachineLogin provider={provider} label={label} data={data} rpc={rpc} run={run} switching={switching !== null} onUse={switchMachine} />
-        <div className="space-y-3 rounded-lg border border-border bg-card p-4 text-sm">
-          <p className="font-medium">{label} accounts run through bb's Account Pooler</p>
-          <p className="text-muted-foreground">
-            The pooler sends {label} traffic to whichever saved account still has quota, so a long task keeps
-            going when one plan runs out. Turning it on changes nothing until you add an account.
-          </p>
-          <Button onClick={() => run(() => rpc.call("poolEnable"), "Account Pooler is on")}>Turn on</Button>
-        </div>
+        <p className="text-sm text-muted-foreground">
+          Sign in with the CLI, then choose Save it. Claude and Codex switch inside Subscription Accounts.
+          Leave the Account Pooler off.
+        </p>
       </div>
     );
   }
@@ -1100,7 +1093,7 @@ function AllQuotas({ data, onOpenProvider }: { data: Overview; onOpenProvider: (
       {TABS.filter((tab): tab is { id: ProviderId; label: string } => tab.id !== "all").map(
         ({ id, label }) => {
           const swap = data.swap.find((section) => section.id === id);
-          const accounts = data.pool.accounts.filter((account) => account.provider === id);
+          const accounts = swap ? [] : data.pool.accounts.filter((account) => account.provider === id);
           const local = id === "claude" || id === "codex" ? data.pool.localLogin[id] : null;
           const localExtraMetrics = local?.inStack
             ? local.usage.metrics.filter(
@@ -1209,17 +1202,17 @@ function AllQuotas({ data, onOpenProvider }: { data: Overview; onOpenProvider: (
 
 function tabSummary(id: TabId, data: Overview): { count: number; tone: "good" | "bad" | "idle" | "warn" } {
   if (id === "all") return { count: 0, tone: "idle" };
-  if (id === "claude" || id === "codex") {
-    const accounts = data.pool.accounts.filter((a) => a.provider === id);
-    const ready = accounts.filter((a) => a.status === "ready").length;
+  const section = data.swap.find((s) => s.id === id);
+  if (section || (id !== "claude" && id !== "codex")) {
+    const accounts = section?.accounts ?? [];
+    const ready = accounts.filter((a) => a.exhaustedUntil <= data.now).length;
     return {
       count: accounts.length,
       tone: accounts.length === 0 ? "idle" : ready > 0 ? "good" : "bad",
     };
   }
-  const section = data.swap.find((s) => s.id === id);
-  const accounts = section?.accounts ?? [];
-  const ready = accounts.filter((a) => a.exhaustedUntil <= data.now).length;
+  const accounts = data.pool.accounts.filter((a) => a.provider === id);
+  const ready = accounts.filter((a) => a.status === "ready").length;
   return {
     count: accounts.length,
     tone: accounts.length === 0 ? "idle" : ready > 0 ? "good" : "bad",
@@ -1358,7 +1351,7 @@ function AccountsPage() {
                 <span className="block text-xs text-muted-foreground">
                   When a thread hits the limit, bb moves to the next account in the list and retries the turn.
                   If every account is used up, it waits for the first one to reset. Applies to Antigravity,
-                  Cursor and Grok.
+                  Claude, Codex, Cursor and Grok.
                 </span>
               </span>
             </label>

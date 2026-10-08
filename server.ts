@@ -1,11 +1,11 @@
 // bb-plugin-subscription-accounts — stack several logins per AI subscription
 // and move to the next one when an account runs out of quota.
 //
-// Antigravity, Cursor and Grok keep their login in one file under HOME. This
-// plugin saves copies of that file per account and swaps them in; a stopped
-// thread starts its next turn with a fresh CLI process that reads the new file.
-// Claude Code and Codex go through bb's builtin Account Pooler (pooler.ts),
-// which routes their traffic by quota without swapping files.
+// Each provider keeps its login in a file under HOME. This plugin saves a copy
+// per account and swaps that file in. A stopped thread starts its next turn
+// with a fresh CLI process that reads the new file. Claude Code and Codex use
+// that same swap. Their provider environment is cleared so traffic does not go
+// through the Account Pooler.
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -17,6 +17,15 @@ import { promisify } from "node:util";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 
+import {
+  classifySubscriptionLimit,
+  directLoginEnv,
+  directProviderForThread,
+  fileLoginFor,
+  readPoolerLogins,
+  stackLoginFromPooler,
+  type FileLogin,
+} from "./direct-login.js";
 import { LoginSession, type LoginState, findBinary, stripAnsi } from "./login.js";
 import { machineCredentials, readLoginFile, replaceLoginFiles } from "./machine-login.js";
 import {
@@ -70,9 +79,13 @@ const SWITCH_GRACE_MS = 60_000;
 const RETRY_SLACK_MS = 15_000;
 const TICK_MS = 60_000;
 
-const swapIdSchema = z.enum(["antigravity", "cursor", "grok"]);
+const stackIdSchema = z.enum(["antigravity", "cursor", "grok", "claude", "codex"]);
 const poolIdSchema = z.enum(["claude", "codex"]);
-const anyProviderSchema = z.enum(["antigravity", "cursor", "grok", "claude", "codex"]);
+const anyProviderSchema = stackIdSchema;
+type StackId = z.infer<typeof stackIdSchema>;
+const STACK_IDS: StackId[] = ["antigravity", "cursor", "grok", "claude", "codex"];
+const POOLER_STAYS_OFF =
+  "Claude and Codex switch inside Subscription Accounts. Leave the Account Pooler off.";
 
 const swapAccountSchema = z.object({
   name: z.string(),
@@ -128,7 +141,7 @@ const overviewSchema = z.object({
   autoSwitch: z.boolean(),
   swap: z.array(
     z.object({
-      id: swapIdSchema,
+      id: stackIdSchema,
       label: z.string(),
       installed: z.boolean(),
       active: z.string().nullable(),
@@ -160,7 +173,7 @@ const overviewSchema = z.object({
   }),
 });
 
-const swapTarget = z.object({ provider: swapIdSchema, name: z.string() });
+const swapTarget = z.object({ provider: stackIdSchema, name: z.string() });
 const ok = z.null();
 
 export const rpcContract = defineRpcContract({
@@ -175,7 +188,7 @@ export const rpcContract = defineRpcContract({
     output: ok,
   },
   saveCurrent: {
-    input: z.object({ provider: swapIdSchema }),
+    input: z.object({ provider: stackIdSchema }),
     output: z.object({ name: z.string() }),
   },
   loginStart: {
@@ -217,6 +230,9 @@ export const rpcContract = defineRpcContract({
 });
 
 export default async function plugin(bb: BbPluginApi) {
+  for (const providerId of ["claude-code", "codex"] as const) {
+    bb.providers.experimental_contributeEnv(providerId, () => directLoginEnv(providerId));
+  }
   const usage = new UsageCache(() => changed());
   const usageController = new AbortController();
   const fetchUsage = createUsageClient(
@@ -235,15 +251,15 @@ export default async function plugin(bb: BbPluginApi) {
   );
   const fetchLocalUsage = createLocalUsageClient(fetch, usageController.signal);
   const localKeys: Partial<Record<PoolProviderId, string>> = {};
-  const usageKey = (provider: SwapProviderId, name: string) => `${provider}/${name}`;
+  const usageKey = (provider: StackId, name: string) => `${provider}/${name}`;
   const settings = bb.settings.define({
     autoSwitch: {
       type: "boolean",
       label: "Switch accounts automatically",
       default: true,
       description:
-        "When an Antigravity, Cursor or Grok turn fails on a quota limit, mark the account as used up, " +
-        "switch to the next saved account, and retry the turn. Claude and Codex are switched by the Account Pooler.",
+        "When a turn fails on a 5-hour or weekly limit, mark that account as used up, " +
+        "switch to the next saved account, and retry the turn.",
     },
     fallbackCooldownMinutes: {
       type: "string",
@@ -319,9 +335,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   // ── swap provider storage ────────────────────────────────────────────────
 
-  const livePath = (provider: SwapProvider) => path.join(os.homedir(), provider.tokenPath);
-
-  async function loadPool(id: SwapProviderId): Promise<PoolState> {
+  async function loadPool(id: StackId): Promise<PoolState> {
     const stored = await bb.storage.kv.get<PoolState>(`pool:${id}`);
     const state = { ...emptyPool(), ...stored };
     // Drop names without a saved account so one bad write cannot wedge a list.
@@ -330,12 +344,12 @@ export default async function plugin(bb: BbPluginApi) {
     return state;
   }
 
-  async function savePool(id: SwapProviderId, state: PoolState): Promise<void> {
+  async function savePool(id: StackId, state: PoolState): Promise<void> {
     await bb.storage.kv.set(`pool:${id}`, state);
     changed();
   }
 
-  function mutate<T>(id: SwapProviderId, change: (state: PoolState) => Promise<T>): Promise<T> {
+  function mutate<T>(id: StackId, change: (state: PoolState) => Promise<T>): Promise<T> {
     return serialized(async () => {
       const state = await loadPool(id);
       const result = await change(state);
@@ -350,67 +364,70 @@ export default async function plugin(bb: BbPluginApi) {
     return meta;
   }
 
-  function readToken(provider: SwapProviderId, name: string): string | null {
+  function readToken(provider: StackId, name: string): string | null {
     const row = db.prepare("SELECT body FROM tokens WHERE provider = ? AND name = ?").get(provider, name) as
       { body: string } | undefined;
     return row?.body ?? null;
   }
 
-  function writeToken(provider: SwapProviderId, name: string, body: string): void {
+  function writeToken(provider: StackId, name: string, body: string): void {
     db.prepare(
       "INSERT INTO tokens (provider, name, body, updated_at) VALUES (?, ?, ?, ?) " +
         "ON CONFLICT(provider, name) DO UPDATE SET body = excluded.body, updated_at = excluded.updated_at",
     ).run(provider, name, body, Date.now());
   }
 
-  function deleteToken(provider: SwapProviderId, name: string): void {
+  function deleteToken(provider: StackId, name: string): void {
     db.prepare("DELETE FROM tokens WHERE provider = ? AND name = ?").run(provider, name);
   }
 
-  async function readLive(provider: SwapProvider): Promise<string | null> {
-    try {
-      return await fs.readFile(livePath(provider), "utf8");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-      throw error;
-    }
+  function loginFile(login: FileLogin): string {
+    return path.join(os.homedir(), login.tokenPath);
   }
 
-  function liveKey(provider: SwapProvider, body: string | null): string | null {
-    if (!body) return null;
-    try {
-      return provider.identify(body).key;
-    } catch {
-      return null;
-    }
+  async function readLiveRaw(login: FileLogin): Promise<string | null> {
+    return readLoginFile(loginFile(login));
   }
 
-  /** Atomic replace so a CLI starting mid-swap never reads half a login. */
-  async function writeLive(provider: SwapProvider, body: string): Promise<void> {
-    const target = livePath(provider);
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    const temp = `${target}.${process.pid}.swap`;
-    await fs.writeFile(temp, body, { mode: 0o600 });
-    await fs.rename(temp, target);
+  async function readProfile(login: FileLogin): Promise<string | null> {
+    if (!login.profilePath) return null;
+    return readLoginFile(path.join(os.homedir(), login.profilePath));
+  }
+
+  /** Replace the CLI login only when it still matches the bytes we read. */
+  async function writeLive(login: FileLogin, stored: string): Promise<void> {
+    const target = loginFile(login);
+    const before = await readLoginFile(target);
+    const files: { path: string; before: string | null; after: string }[] = [];
+    if (login.profilePath) {
+      const profilePath = path.join(os.homedir(), login.profilePath);
+      const profile = await readLoginFile(profilePath);
+      const patched = login.profileBytes(profile, stored);
+      if (patched !== null) files.push({ path: profilePath, before: profile, after: patched });
+    }
+    files.push({ path: target, before, after: login.liveBytes(stored) });
+    await replaceLoginFiles(files);
   }
 
   /** The CLIs refresh their tokens in place; copy that back into the active slot. */
-  async function syncActive(provider: SwapProvider, state: PoolState): Promise<boolean> {
+  async function syncActive(login: FileLogin, state: PoolState): Promise<boolean> {
     if (!state.active) return false;
     const meta = state.accounts[state.active];
-    const live = await readLive(provider);
+    const live = await readLiveRaw(login);
     if (!meta || !live) return false;
-    if (liveKey(provider, live) !== meta.key) return false;
-    if (readToken(provider.id, state.active) === live) return false;
-    writeToken(provider.id, state.active, live);
+    const profile = await readProfile(login);
+    if (!login.sameLive(meta, live, profile)) return false;
+    const stored = login.refreshStored(meta, live, profile);
+    if (!stored || readToken(login.id, state.active) === stored) return false;
+    writeToken(login.id, state.active, stored);
     return true;
   }
 
-  async function activate(provider: SwapProvider, state: PoolState, name: string): Promise<void> {
-    const body = readToken(provider.id, name);
+  async function activate(login: FileLogin, state: PoolState, name: string): Promise<void> {
+    const body = readToken(login.id, name);
     if (!body) throw new Error(`No saved login for "${name}". Add it again.`);
-    await syncActive(provider, state);
-    await writeLive(provider, body);
+    await syncActive(login, state);
+    await writeLive(login, body);
     state.active = name;
     state.lastSwitchAt = Date.now();
     state.accounts[name].lastActivatedAt = state.lastSwitchAt;
@@ -434,14 +451,15 @@ export default async function plugin(bb: BbPluginApi) {
   // ── swap operations shared by the CLI and the page ───────────────────────
 
   async function addAccount(
-    provider: SwapProvider,
+    login: FileLogin,
     rawName: string | undefined,
     body: string,
     options: { force?: boolean; makeActive?: boolean; home?: string } = {},
   ): Promise<string> {
-    const identity = provider.identify(body);
-    const email = identity.email ?? (await whoami(provider, options.home));
-    return mutate(provider.id, async (state) => {
+    const identity = login.identify(body);
+    const swap = isSwapId(login.id) ? SWAP_PROVIDERS[login.id] : null;
+    const email = identity.email ?? (swap ? await whoami(swap, options.home) : null);
+    return mutate(login.id, async (state) => {
       const clash = Object.values(state.accounts).find((meta) => meta.key === identity.key);
       const name = rawName?.trim()
         ? validateName(rawName)
@@ -452,8 +470,8 @@ export default async function plugin(bb: BbPluginApi) {
       if (state.accounts[name] && state.accounts[name].key !== identity.key && !options.force) {
         throw new Error(`"${name}" already exists. Pass --force to replace its login.`);
       }
-      writeToken(provider.id, name, body);
-      usage.remove(usageKey(provider.id, name));
+      writeToken(login.id, name, body);
+      usage.remove(usageKey(login.id, name));
       const meta: AccountMeta = state.accounts[name] ?? {
         name,
         email,
@@ -476,31 +494,32 @@ export default async function plugin(bb: BbPluginApi) {
     });
   }
 
-  async function saveCurrent(provider: SwapProvider, rawName?: string, force = false): Promise<string> {
-    const body = await readLive(provider);
-    if (!body) throw new Error(`${provider.label} is not signed in on this machine.`);
-    return addAccount(provider, rawName, body, { force, makeActive: true });
+  async function saveCurrent(login: FileLogin, rawName?: string, force = false): Promise<string> {
+    const live = await readLiveRaw(login);
+    const stored = live ? login.capture(live, await readProfile(login)) : null;
+    if (!stored) throw new Error(`${login.label} is not signed in on this machine.`);
+    return addAccount(login, rawName, stored, { force, makeActive: true });
   }
 
-  const useAccount = (provider: SwapProvider, raw: string) =>
-    mutate(provider.id, async (state) => {
+  const useAccount = (login: FileLogin, raw: string) =>
+    mutate(login.id, async (state) => {
       const meta = requireAccount(state, raw);
-      await activate(provider, state, meta.name);
+      await activate(login, state, meta.name);
       return meta;
     });
 
-  const markUsed = (provider: SwapProvider, raw: string) =>
-    mutate(provider.id, async (state) => {
+  const markUsed = (login: FileLogin, raw: string) =>
+    mutate(login.id, async (state) => {
       const meta = requireAccount(state, raw);
       meta.exhaustedUntil = Date.now() + (await fallbackCooldownMs());
       if (state.active !== meta.name) return null;
       const next = nextUsable(state, Date.now());
-      if (next && next !== meta.name) await activate(provider, state, next);
+      if (next && next !== meta.name) await activate(login, state, next);
       return next;
     });
 
-  const resetAccounts = (provider: SwapProvider, names: string[] | null) =>
-    mutate(provider.id, async (state) => {
+  const resetAccounts = (login: FileLogin, names: string[] | null) =>
+    mutate(login.id, async (state) => {
       const targets = names ?? state.order;
       for (const name of targets) {
         const meta = requireAccount(state, name);
@@ -510,18 +529,18 @@ export default async function plugin(bb: BbPluginApi) {
       return targets;
     });
 
-  const removeAccount = (provider: SwapProvider, raw: string) =>
-    mutate(provider.id, async (state) => {
+  const removeAccount = (login: FileLogin, raw: string) =>
+    mutate(login.id, async (state) => {
       const meta = requireAccount(state, raw);
       delete state.accounts[meta.name];
       state.order = state.order.filter((n) => n !== meta.name);
-      deleteToken(provider.id, meta.name);
-      usage.remove(usageKey(provider.id, meta.name));
+      deleteToken(login.id, meta.name);
+      usage.remove(usageKey(login.id, meta.name));
       if (state.active === meta.name) state.active = null;
     });
 
-  const moveAccount = (provider: SwapProvider, raw: string, direction: "up" | "down") =>
-    mutate(provider.id, async (state) => {
+  const moveAccount = (login: FileLogin, raw: string, direction: "up" | "down") =>
+    mutate(login.id, async (state) => {
       state.order = moveInOrder(state.order, requireAccount(state, raw).name, direction);
     });
 
@@ -559,52 +578,73 @@ export default async function plugin(bb: BbPluginApi) {
   async function handleFailure(event: { threadId: string; requestId: string; attemptNumber: number }) {
     if (!(await settings.get()).autoSwitch) return;
     const thread = await bb.sdk.threads.get({ threadId: event.threadId });
-    const provider = swapProviderForThread(thread.providerId);
-    if (!provider) return;
+    const swap = swapProviderForThread(thread.providerId);
+    const directId = directProviderForThread(thread.providerId);
+    if (!swap && !directId) return;
     const error = await latestProviderError(event.threadId);
-    if (!error || !provider.quota.test(error)) return;
+    if (!error) return;
+    const now = Date.now();
+    let login: FileLogin;
+    let resetMs: number;
+    let quoteReset: boolean;
+    if (swap) {
+      if (!swap.quota.test(error)) return;
+      resetMs = parseResetMs(error) ?? (await fallbackCooldownMs());
+      login = fileLoginFor(swap.id);
+      quoteReset = false;
+    } else if (directId) {
+      const limit = classifySubscriptionLimit(error, now);
+      if (limit.kind === "none") return;
+      if (limit.resetAt !== null && limit.resetAt <= now) return;
+      resetMs = limit.resetAt === null ? await fallbackCooldownMs() : limit.resetAt - now;
+      login = fileLoginFor(directId);
+      quoteReset = true;
+    } else {
+      return;
+    }
 
     await serialized(async () => {
-      const state = await loadPool(provider.id);
+      const state = await loadPool(login.id);
       if (state.order.length === 0) return;
       if (event.attemptNumber > state.order.length + 1) {
         bb.log.warn(`${event.threadId}: giving up after ${event.attemptNumber} attempts`);
         return;
       }
 
-      const now = Date.now();
       const onOldAccount = event.attemptNumber === 1 && now - state.lastSwitchAt < SWITCH_GRACE_MS;
       if (!onOldAccount) {
         const meta = state.active ? state.accounts[state.active] : undefined;
         if (meta) {
-          const resetMs = parseResetMs(error) ?? (await fallbackCooldownMs());
           meta.exhaustedUntil = now + resetMs;
           meta.lastError = error.slice(0, 300);
-          bb.log.info(`${provider.id}/${meta.name} out of quota for ${formatDuration(resetMs)}`);
+          bb.log.info(`${login.id}/${meta.name} out of quota for ${formatDuration(resetMs)}`);
         }
         const next = nextUsable(state, now);
         if (next && next !== state.active) {
           const from = state.active;
-          await activate(provider, state, next);
-          bb.log.info(`${provider.id}: switched ${from ?? "(none)"} -> ${next}`);
+          await activate(login, state, next);
+          bb.log.info(`${login.id}: switched ${from ?? "(none)"} -> ${next}`);
         } else if (!next) {
           const soonest = earliestReset(state);
-          await savePool(provider.id, state);
+          await savePool(login.id, state);
           if (!soonest) return;
+          const when = quoteReset
+            ? ` The earliest reset is ${new Date(soonest.at).toISOString()} (${soonest.name}).`
+            : ` Retrying when ${soonest.name} resets.`;
           await restartAndRetry(
             event.threadId,
             event.requestId,
-            `All ${provider.label} accounts are out of quota. Retrying when ${soonest.name} resets.`,
+            `All ${login.label} accounts are out of quota.${when}`,
             soonest.at + RETRY_SLACK_MS,
           );
           return;
         }
       }
-      await savePool(provider.id, state);
+      await savePool(login.id, state);
       await restartAndRetry(
         event.threadId,
         event.requestId,
-        `${provider.label} quota reached. Continuing on ${state.active}.`,
+        `${login.label} quota reached. Continuing on ${state.active}.`,
       );
     });
   }
@@ -620,18 +660,18 @@ export default async function plugin(bb: BbPluginApi) {
   bb.background.service("rotation-tick", {
     async start(signal) {
       while (!signal.aborted) {
-        for (const id of SWAP_IDS) {
-          const provider = SWAP_PROVIDERS[id];
+        for (const id of STACK_IDS) {
+          const login = fileLoginFor(id);
           try {
             await serialized(async () => {
               const state = await loadPool(id);
-              let dirty = await syncActive(provider, state);
+              let dirty = await syncActive(login, state);
               const now = Date.now();
               const active = state.active ? state.accounts[state.active] : undefined;
               if (active && !isUsable(active, now)) {
                 const next = nextUsable(state, now);
                 if (next && next !== state.active) {
-                  await activate(provider, state, next);
+                  await activate(login, state, next);
                   dirty = true;
                   bb.log.info(`${id}: quota reset, now on ${next}`);
                 }
@@ -707,7 +747,7 @@ export default async function plugin(bb: BbPluginApi) {
           }
         },
         async (tokenFile, sessionHome) =>
-          addAccount(spec, undefined, await fs.readFile(tokenFile, "utf8"), {
+          addAccount(fileLoginFor(spec.id), undefined, await fs.readFile(tokenFile, "utf8"), {
             makeActive: true,
             home: sessionHome,
           }),
@@ -718,54 +758,7 @@ export default async function plugin(bb: BbPluginApi) {
       return login;
     }
 
-    await ensurePooler();
-    if (provider === "claude") {
-      const started = await pool.claudeLoginStart();
-      claudeSessionId = started.sessionId;
-      return loginState("claude", {
-        status: "waiting",
-        url: started.authorizeUrl,
-        needsCode: true,
-        expiresAt: Date.now() + 10 * 60_000,
-      });
-    }
-
-    const started = await pool.codexLoginStart();
-    const state = loginState("codex", {
-      status: "waiting",
-      url: started.verificationUri,
-      userCode: started.userCode,
-      expiresAt: started.expiresAt,
-    });
-    const poll = async () => {
-      if (!codexPoll || codexPoll.sessionId !== started.sessionId) return;
-      try {
-        const result = await pool.codexLoginPoll(started.sessionId);
-        if (result.status === "complete") {
-          codexPoll = null;
-          updateLogin({
-            status: "done",
-            account: result.account.email ?? result.account.label,
-          });
-          return;
-        }
-        if (result.status === "error") {
-          codexPoll = null;
-          updateLogin({ status: "failed", error: result.message });
-          return;
-        }
-      } catch (error) {
-        codexPoll = null;
-        updateLogin({ status: "failed", error: (error as Error).message });
-        return;
-      }
-      codexPoll.timer = setTimeout(poll, started.intervalMs);
-    };
-    codexPoll = {
-      sessionId: started.sessionId,
-      timer: setTimeout(poll, started.intervalMs),
-    };
-    return state;
+    throw new Error("Sign in with the CLI, then Save it.");
   }
 
   async function submitLogin(code: string): Promise<LoginState> {
@@ -791,15 +784,159 @@ export default async function plugin(bb: BbPluginApi) {
     return login;
   }
 
-  async function ensurePooler(): Promise<void> {
-    const view = await pool.view();
-    if (!view.installed) throw new Error("bb's Account Pooler plugin is not available in this bb.");
-    if (!view.enabled) await pool.enable();
+  function sameStackIdentity(
+    provider: "claude" | "codex",
+    row: { key: string; email: string | null },
+    identity: { key: string; email: string | null },
+  ): boolean {
+    if (row.key === identity.key) return true;
+    return provider === "claude" && Boolean(
+      identity.email && row.email && identity.email.toLowerCase() === row.email.toLowerCase(),
+    );
   }
+
+  async function readPoolerSecret(id: string): Promise<string | null> {
+    if (!/^[a-zA-Z0-9_-]+$/.test(id)) return null;
+    try {
+      return await fs.readFile(
+        path.join(bb.server.experimental_dataDir, "plugins/account-pool/secrets/accounts", `account-${id}.json`),
+        "utf8",
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  /** Copy enabled pooler logins once. Never writes the CLI file or changes those accounts. */
+  async function importDirectLogins(): Promise<void> {
+    const snapshot = readPoolerLogins(bb.server.experimental_dataDir);
+    for (const provider of ["claude", "codex"] as const) {
+      try {
+        await serialized(async () => {
+          const state = await loadPool(provider);
+          if (state.order.length > 0) return;
+          const login = fileLoginFor(provider);
+          const taken = new Set<string>();
+          const rows: {
+            name: string;
+            key: string;
+            email: string | null;
+            body: string;
+            sourceId: string | null;
+          }[] = [];
+          const enabled = snapshot.accounts
+            .filter((account) => account.provider === provider && account.enabled)
+            .sort((left, right) => left.priority - right.priority);
+          for (const account of enabled) {
+            const secret = await readPoolerSecret(account.id);
+            if (!secret) continue;
+            const saved = stackLoginFromPooler(account, secret, taken);
+            if (!saved) continue;
+            taken.add(saved.name);
+            rows.push({
+              name: saved.name,
+              key: saved.key,
+              email: saved.email,
+              body: saved.body,
+              sourceId: account.id,
+            });
+          }
+          const live = await readLiveRaw(login);
+          const profile = await readProfile(login);
+          const captured = live ? login.capture(live, profile) : null;
+          let liveIdentity: { key: string; email: string | null } | null = null;
+          if (captured) {
+            try {
+              liveIdentity = login.identify(captured);
+            } catch {
+              liveIdentity = null;
+            }
+          }
+          if (captured && liveIdentity) {
+            const identity = liveIdentity;
+            if (!rows.some((row) => sameStackIdentity(provider, row, identity))) {
+              const name = nameFromEmail(identity.email, taken);
+              rows.unshift({
+                name,
+                key: identity.key,
+                email: identity.email,
+                body: captured,
+                sourceId: null,
+              });
+            }
+          }
+          if (rows.length === 0) return;
+          const now = Date.now();
+          for (const row of rows) {
+            writeToken(provider, row.name, row.body);
+            state.accounts[row.name] = {
+              name: row.name,
+              email: row.email,
+              key: row.key,
+              addedAt: now,
+              exhaustedUntil: 0,
+              lastError: null,
+              lastActivatedAt: null,
+            };
+            state.order.push(row.name);
+          }
+          let matchedLive: (typeof rows)[number] | undefined;
+          if (liveIdentity) {
+            const identity = liveIdentity;
+            matchedLive = rows.find((row) => sameStackIdentity(provider, row, identity));
+          }
+          const poolerId = snapshot.active[provider];
+          const matchedPooler = poolerId ? rows.find((row) => row.sourceId === poolerId) : undefined;
+          state.active = matchedLive?.name ?? matchedPooler?.name ?? null;
+          await savePool(provider, state);
+        });
+      } catch (error) {
+        bb.log.warn(`${provider} login import failed: ${(error as Error).message}`);
+      }
+    }
+  }
+
+  await importDirectLogins();
 
   // ── page RPC ─────────────────────────────────────────────────────────────
 
-  function refreshUsage(provider: SwapProviderId, name: string, force = false) {
+  function refreshUsage(provider: StackId, name: string, force = false) {
+    const login = fileLoginFor(provider);
+    if (provider === "claude" || provider === "codex") {
+      return usage.refresh(
+        usageKey(provider, name),
+        async () => {
+          let stored: string | null = null;
+          await serialized(async () => {
+            const state = await loadPool(provider);
+            requireAccount(state, name);
+            await syncActive(login, state);
+            stored = readToken(provider, name);
+          });
+          if (!stored) throw new UsageError("No saved login. Add this account again.");
+          const expectedCredentials = login.liveBytes(stored);
+          return fetchLocalUsage(provider, expectedCredentials, {
+            save: async (updated, expected) =>
+              serialized(async () => {
+                const current = readToken(provider, name);
+                if (!current || login.liveBytes(current) !== expected) return false;
+                const state = await loadPool(provider);
+                const meta = state.accounts[name];
+                if (!meta) return false;
+                const profile = await readProfile(login);
+                const nextStored = login.refreshStored(meta, updated, profile);
+                if (!nextStored) return false;
+                if (state.active === name && (await readLiveRaw(login)) === login.liveBytes(current)) {
+                  await writeLive(login, nextStored);
+                }
+                writeToken(provider, name, nextStored);
+                return true;
+              }),
+          });
+        },
+        force,
+      );
+    }
     return usage.refresh(
       usageKey(provider, name),
       async () => {
@@ -807,7 +944,7 @@ export default async function plugin(bb: BbPluginApi) {
         await serialized(async () => {
           const state = await loadPool(provider);
           requireAccount(state, name);
-          await syncActive(SWAP_PROVIDERS[provider], state);
+          await syncActive(login, state);
           body = readToken(provider, name);
         });
         if (!body) throw new UsageError("No saved login. Add this account again.");
@@ -819,8 +956,8 @@ export default async function plugin(bb: BbPluginApi) {
             if (readToken(provider, name) !== expectedBody) return;
             const state = await loadPool(provider);
             if (!state.accounts[name]) return;
-            if (state.active === name && (await readLive(SWAP_PROVIDERS[provider])) === expectedBody) {
-              await writeLive(SWAP_PROVIDERS[provider], updated);
+            if (state.active === name && (await readLiveRaw(login)) === expectedBody) {
+              await writeLive(login, updated);
             }
             writeToken(provider, name, updated);
             expectedBody = updated;
@@ -1048,28 +1185,33 @@ export default async function plugin(bb: BbPluginApi) {
     overview: async () => {
       for (const id of ["claude", "codex", "grok"] as const) void history.refresh(id);
       const swap = await Promise.all(
-        SWAP_IDS.map(async (id) => {
-          const provider = SWAP_PROVIDERS[id];
+        STACK_IDS.map(async (id) => {
+          const login = fileLoginFor(id);
           const state = await serialized(async () => {
             const loaded = await loadPool(id);
-            if (await syncActive(provider, loaded)) await bb.storage.kv.set(`pool:${id}`, loaded);
+            if (await syncActive(login, loaded)) await bb.storage.kv.set(`pool:${id}`, loaded);
             return loaded;
           });
-          const live = await readLive(provider);
-          const key = liveKey(provider, live);
-          const savedMeta = Object.values(state.accounts).find((meta) => meta.key === key);
+          const live = await readLiveRaw(login);
+          const profile = await readProfile(login);
+          const captured = live ? login.capture(live, profile) : null;
+          let key: string | null = null;
           let email: string | null = null;
-          if (live) {
+          if (captured) {
             try {
-              email = provider.identify(live).email;
+              const identity = login.identify(captured);
+              key = identity.key;
+              email = identity.email;
             } catch {
               // not a usable login
             }
           }
+          const savedMeta = key ? Object.values(state.accounts).find((meta) => meta.key === key) : undefined;
+          const binary = isSwapId(id) ? SWAP_PROVIDERS[id].login.binary : id;
           return {
             id,
-            label: provider.label,
-            installed: (await findBinary(provider.login.binary)) !== null,
+            label: login.label,
+            installed: (await findBinary(binary)) !== null || captured !== null,
             active: state.active,
             accounts: state.order.map((name) => {
               const meta = state.accounts[name];
@@ -1121,27 +1263,27 @@ export default async function plugin(bb: BbPluginApi) {
       return null;
     },
     use: async ({ provider, name }) => {
-      await useAccount(SWAP_PROVIDERS[provider], name);
+      await useAccount(fileLoginFor(provider), name);
       return null;
     },
     markUsed: async ({ provider, name }) => {
-      await markUsed(SWAP_PROVIDERS[provider], name);
+      await markUsed(fileLoginFor(provider), name);
       return null;
     },
     reset: async ({ provider, name }) => {
-      await resetAccounts(SWAP_PROVIDERS[provider], [name]);
+      await resetAccounts(fileLoginFor(provider), [name]);
       return null;
     },
     remove: async ({ provider, name }) => {
-      await removeAccount(SWAP_PROVIDERS[provider], name);
+      await removeAccount(fileLoginFor(provider), name);
       return null;
     },
     move: async ({ provider, name, direction }) => {
-      await moveAccount(SWAP_PROVIDERS[provider], name, direction);
+      await moveAccount(fileLoginFor(provider), name, direction);
       return null;
     },
     saveCurrent: async ({ provider }) => ({
-      name: await saveCurrent(SWAP_PROVIDERS[provider]),
+      name: await saveCurrent(fileLoginFor(provider)),
     }),
     loginStart: async ({ provider }) => startLogin(provider),
     loginSubmit: async ({ code }) => submitLogin(code),
@@ -1152,15 +1294,10 @@ export default async function plugin(bb: BbPluginApi) {
       return null;
     },
     poolEnable: async () => {
-      await ensurePooler();
-      changed();
-      return null;
+      throw new Error(POOLER_STAYS_OFF);
     },
     poolImport: async ({ provider }) => {
-      await ensurePooler();
-      const view = await pool.view();
-      const last = view.accounts.filter((a) => a.provider === provider).map((a) => a.priority);
-      await pool.importLocal(provider, last.length ? Math.max(...last) + 1 : 0);
+      await saveCurrent(fileLoginFor(provider));
       changed();
       return null;
     },
@@ -1228,7 +1365,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   // ── CLI ──────────────────────────────────────────────────────────────────
 
-  const swapList = SWAP_IDS.join("|");
+  const stackList = STACK_IDS.join("|");
   bb.cli.register({
     name: "subs",
     summary: "Stack logins per AI subscription and switch when one runs out of quota",
@@ -1241,27 +1378,27 @@ export default async function plugin(bb: BbPluginApi) {
       {
         name: "add",
         summary: "Save the login a CLI is using now (or a login file)",
-        usage: `bb subs add <${swapList}> [<name>] [--from <file>] [--force]`,
+        usage: `bb subs add <${stackList}> [<name>] [--from <file>] [--force]`,
       },
       {
         name: "use",
-        summary: "Switch a provider to an account now",
-        usage: `bb subs use <${swapList}|claude|codex> <name-or-account-id>`,
+        summary: "Switch a provider to a saved account now",
+        usage: `bb subs use <${stackList}> <name>`,
       },
       {
         name: "next",
         summary: "Mark the active account used up and switch to the next one",
-        usage: `bb subs next <${swapList}>`,
+        usage: `bb subs next <${stackList}>`,
       },
       {
         name: "reset",
         summary: "Clear out-of-quota marks",
-        usage: `bb subs reset <${swapList}> [<name>]`,
+        usage: `bb subs reset <${stackList}> [<name>]`,
       },
       {
         name: "remove",
         summary: "Forget an account",
-        usage: `bb subs remove <${swapList}> <name>`,
+        usage: `bb subs remove <${stackList}> <name>`,
       },
     ],
     async run(argv) {
@@ -1273,20 +1410,18 @@ export default async function plugin(bb: BbPluginApi) {
         (arg, index) => !arg.startsWith("--") && !(fromIndex >= 0 && index === fromIndex + 1),
       );
       const [subcommand = "list", rawProvider, rawName] = positional;
-      const provider = (): SwapProvider => {
-        if (rawProvider === "claude" || rawProvider === "codex") {
-          throw new Error(
-            `${rawProvider} accounts are managed by the Account Pooler: use the Subscription Accounts page or \`bb pool\`.`,
-          );
-        }
-        if (!rawProvider || !isSwapId(rawProvider)) throw new Error(`Provider must be one of ${swapList}.`);
-        return SWAP_PROVIDERS[rawProvider];
+      const provider = (): FileLogin => {
+        const parsed = stackIdSchema.safeParse(rawProvider);
+        if (!parsed.success) throw new Error(`Provider must be one of ${stackList}.`);
+        return fileLoginFor(parsed.data);
       };
 
       try {
         switch (subcommand) {
           case "list": {
-            const ids = rawProvider && isSwapId(rawProvider) ? [rawProvider] : SWAP_IDS;
+            const chosen = rawProvider ? stackIdSchema.safeParse(rawProvider) : null;
+            if (chosen && !chosen.success) throw new Error(`Provider must be one of ${stackList}.`);
+            const ids = chosen?.success ? [chosen.data] : STACK_IDS;
             const states = await Promise.all(ids.map(async (id) => [id, await loadPool(id)] as const));
             const view = await pool.view();
             if (json) {
@@ -1312,29 +1447,18 @@ export default async function plugin(bb: BbPluginApi) {
                 ),
               );
             }
-            const sections = states.map(([id, s]) => renderList(SWAP_PROVIDERS[id].label, s));
-            if (!rawProvider || rawProvider === "claude" || rawProvider === "codex") {
-              sections.push(renderPool(view.enabled, view.accounts));
-            }
+            const sections = states.map(([id, s]) => renderList(fileLoginFor(id).label, s));
             return done(sections.join("\n\n"));
           }
           case "add": {
             const spec = provider();
-            const name = from
-              ? await addAccount(spec, rawName, await fs.readFile(from, "utf8"), { force })
+            const raw = from ? await fs.readFile(from, "utf8") : null;
+            const name = raw
+              ? await addAccount(spec, rawName, spec.capture(raw, null) ?? raw, { force })
               : await saveCurrent(spec, rawName, force);
             return done(`Saved ${spec.label} account ${name}.`);
           }
           case "use": {
-            if (rawProvider === "claude" || rawProvider === "codex") {
-              if (!rawName) throw new Error("Provide a saved account ID from bb subs list.");
-              const view = await pool.view();
-              if (!view.accounts.some((a) => a.id === rawName && a.provider === rawProvider)) {
-                throw new Error("No saved account with this ID for this provider.");
-              }
-              await usePoolAccount(rawName);
-              return done(`Switched the machine ${rawProvider} login.`);
-            }
             const meta = await useAccount(provider(), rawName ?? "");
             return done(`Now using ${meta.name}${meta.email ? ` (${meta.email})` : ""}.`);
           }
@@ -1393,16 +1517,6 @@ function renderList(label: string, state: PoolState): string {
     return `${marker} ${name.padEnd(18)} ${(meta.email ?? "").padEnd(32)} ${status}`;
   });
   return [label, ...rows].join("\n");
-}
-
-function renderPool(enabled: boolean, accounts: PoolAccount[]): string {
-  if (!enabled)
-    return "Claude / Codex\n  Account Pooler is off. Turn it on from the Subscription Accounts page.";
-  if (accounts.length === 0) return "Claude / Codex\n  (no accounts)";
-  const rows = accounts.map(
-    (a) => `  ${a.provider.padEnd(7)} ${(a.email ?? a.label).padEnd(32)} ${a.status}`,
-  );
-  return ["Claude / Codex (Account Pooler)", ...rows].join("\n");
 }
 
 function done(stdout: string): { exitCode: number; stdout: string } {

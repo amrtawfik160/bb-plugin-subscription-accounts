@@ -1,9 +1,8 @@
 // What each subscription looks like on disk and in bb.
 //
-// "swap" providers keep their login in one file under HOME. This plugin saves
-// copies of that file and swaps them in. Claude Code and Codex are "pool"
-// providers: bb's builtin Account Pooler routes their traffic instead, so they
-// are described in pooler.ts, not here.
+// Antigravity, Cursor and Grok keep one login file under HOME. Claude Code and
+// Codex do too. direct-login.ts stores those Claude and Codex copies and swaps
+// the same files. The Account Pooler is not used.
 
 export type SwapProviderId = "antigravity" | "cursor" | "grok";
 export type PoolProviderId = "claude" | "codex";

@@ -17,6 +17,8 @@
   "include": [
     "server.ts",
     "server.test.ts",
+    "direct-login.ts",
+    "direct-login.test.ts",
     "app.tsx",
     "app.test.tsx",
     "components",
