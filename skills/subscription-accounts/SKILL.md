@@ -33,10 +33,10 @@ A switching cooldown is separate from measured quota. Failed requests keep
 dated last-known readings. Use `bb subs quota --json` to inspect current plan,
 group, and model limits. Use `--refresh` for a new reading. See
 `../subscription-quota/SKILL.md` for unknown data and shared-limit interpretation.
-The page's **Log in again** action renews the selected Antigravity, Cursor, or
-Grok login and refreshes usage. Sign in with the same account. Its saved name,
-order, and active selection remain intact. Claude and Codex require their CLI
-login, then **Save it**.
+The page's **Log in again** action renews that saved account through an
+isolated provider CLI sign-in, keeps its name, order and active selection, and
+refreshes usage. Sign in with the same account. A different identity is
+rejected. See the README for Claude/Codex link-and-code details.
 
 Usage trends show daily tokens, Today/Yesterday/30-day totals and model shares.
 Claude, Codex and Grok trends use local CLI logs and include all logins on the
@@ -46,8 +46,9 @@ unknown costs are not zero. Partial scans are labeled. Known quota windows
 show a steady-pace estimate, not a promise about when quota will run out.
 
 To add another account, prefer the page's **Add account** button. It signs in
-under a temporary HOME, so the current login stays in place. Do not log out
-of a CLI to add an account, because logging out can revoke the saved copy's
+under a temporary HOME, so the current login stays in place. Page-added
+Claude and Codex accounts stay Ready until **Use now**. Do not log out of a
+CLI to add an account, because logging out can revoke the saved copy's
 refresh token.
 
 Never print login files or the plugin database; they hold refresh tokens.

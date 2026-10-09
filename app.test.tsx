@@ -69,6 +69,122 @@ const ready: AccountUsage = {
 };
 
 describe("subscription usage page", () => {
+  it.each(["claude", "codex"] as const)("offers Add %s account separately from saved-account recovery", async (provider) => {
+    const app = await loadPluginApp(() => import("./app"));
+    const data = fixture(ready);
+    const label = provider === "claude" ? "Claude" : "Codex";
+    const loginStart = vi.fn(async () => ({
+      id: "add-cli", provider, targetAccount: null, status: "waiting",
+      url: "https://example.com/consent", needsCode: provider === "claude",
+      userCode: provider === "codex" ? "ABCD-1234" : null,
+      expiresAt: now + 60_000, error: null, account: null,
+    }));
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, {
+      rpc: { overview: () => ({ ...data, swap: [{ ...data.swap[0], id: provider, label }] }), loginStart },
+    });
+    fireEvent.click(await slot.findByRole("tab", { name: new RegExp(label) }));
+    expect(slot.getByRole("button", { name: "Log in again for test-account" })).toBeTruthy();
+    fireEvent.click(slot.getByRole("button", { name: `Add ${label} account` }));
+    await waitFor(() => expect(loginStart).toHaveBeenCalledWith({ provider }));
+    expect(await slot.findByRole("link", { name: "Open sign-in page" })).toBeTruthy();
+    expect(slot.getByText(/the account you want to add/)).toBeTruthy();
+    expect(slot.getByRole("button", { name: "Cancel" })).toBeTruthy();
+    if (provider === "codex") expect(slot.getByText("ABCD-1234")).toBeTruthy();
+    slot.lifecycle.unmount();
+  });
+
+  it.each(["claude", "codex"] as const)("provides setup guidance when the %s CLI is missing", async (provider) => {
+    const app = await loadPluginApp(() => import("./app"));
+    const data = fixture(ready);
+    const label = provider === "claude" ? "Claude" : "Codex";
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, {
+      rpc: { overview: () => ({ ...data, swap: [{ ...data.swap[0], id: provider, label, installed: false, accounts: [] }] }) },
+    });
+    fireEvent.click(await slot.findByRole("tab", { name: new RegExp(label) }));
+    expect(slot.getByRole("link", { name: `Set up ${label} CLI` })).toBeTruthy();
+    expect(slot.getByText(new RegExp(`Install the ${label} CLI on the bb server`))).toBeTruthy();
+    expect(slot.queryByRole("button", { name: `Add ${label} account` })).toBeNull();
+    slot.lifecycle.unmount();
+  });
+
+  it.each(["claude", "codex"] as const)("shows Ready and Use now for an inactive page-added %s account", async (provider) => {
+    const app = await loadPluginApp(() => import("./app"));
+    const data = fixture(ready);
+    const label = provider === "claude" ? "Claude" : "Codex";
+    const account = {
+      name: "new",
+      email: "new@example.com",
+      active: false,
+      exhaustedUntil: 0,
+      lastError: null,
+      usage: ready,
+    };
+    const use = vi.fn(async () => undefined);
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, {
+      rpc: {
+        overview: () => ({
+          ...data,
+          swap: [{ ...data.swap[0], id: provider, label, active: null, accounts: [account] }],
+        }),
+        use,
+      },
+    });
+    fireEvent.click(await slot.findByRole("tab", { name: new RegExp(label) }));
+    expect(slot.getByText("Ready")).toBeTruthy();
+    expect(slot.queryByText("In use")).toBeNull();
+    fireEvent.click(slot.getByRole("button", { name: "Use now" }));
+    await waitFor(() => expect(use).toHaveBeenCalledWith({ provider, name: "new" }));
+    slot.lifecycle.unmount();
+  });
+
+  it.each(["claude", "codex"] as const)("shows missing %s CLI setup once when saved accounts exist", async (provider) => {
+    const app = await loadPluginApp(() => import("./app"));
+    const data = fixture(ready);
+    const label = provider === "claude" ? "Claude" : "Codex";
+    const accounts = [
+      { name: "one", email: "one@example.com", active: false, exhaustedUntil: 0, lastError: null, usage: ready },
+      { name: "two", email: "two@example.com", active: false, exhaustedUntil: 0, lastError: null, usage: ready },
+    ];
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, {
+      rpc: {
+        overview: () => ({
+          ...data,
+          swap: [{ ...data.swap[0], id: provider, label, installed: false, active: null, accounts }],
+        }),
+      },
+    });
+    fireEvent.click(await slot.findByRole("tab", { name: new RegExp(label) }));
+    expect(slot.getAllByRole("link", { name: `Set up ${label} CLI` })).toHaveLength(1);
+    expect(slot.getAllByText(new RegExp(`Install the ${label} CLI on the bb server`))).toHaveLength(1);
+    expect(slot.queryByRole("button", { name: "Log in again for one" })).toBeNull();
+    expect(slot.queryByRole("button", { name: "Log in again for two" })).toBeNull();
+    expect(slot.queryByRole("button", { name: `Add ${label} account` })).toBeNull();
+    slot.lifecycle.unmount();
+  });
+
+  it.each(["claude", "codex"] as const)("offers isolated recovery for an expired saved %s CLI login", async (provider) => {
+    const app = await loadPluginApp(() => import("./app"));
+    const data = fixture({ ...ready, status: "error", error: "The CLI session expired or its refresh token was replaced. Sign in again." });
+    const section = { ...data.swap[0], id: provider, label: provider === "claude" ? "Claude" : "Codex" };
+    const loginStart = vi.fn(async () => ({
+      id: "cli-recovery", provider, targetAccount: "test-account", status: "waiting",
+      url: "https://example.com/sign-in", needsCode: provider === "claude",
+      userCode: provider === "codex" ? "ABCD-1234" : null,
+      expiresAt: now + 60_000, error: null, account: null,
+    }));
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, {
+      rpc: { overview: () => ({ ...data, swap: [section] }), loginStart },
+    });
+    fireEvent.click(await slot.findByRole("tab", { name: new RegExp(section.label) }));
+    expect(slot.getByText("In use · login expired")).toBeTruthy();
+    expect(slot.queryByText("Ready")).toBeNull();
+    fireEvent.click(await slot.findByRole("button", { name: "Log in again for test-account" }));
+    await waitFor(() => expect(loginStart).toHaveBeenCalledWith({ provider, name: "test-account" }));
+    expect(await slot.findByRole("link", { name: "Open sign-in page" })).toBeTruthy();
+    expect(slot.queryByText(/refresh token was replaced/)).toBeNull();
+    slot.lifecycle.unmount();
+  });
+
   it("offers account-specific re-login instead of duplicate expired-login errors", async () => {
     const app = await loadPluginApp(() => import("./app"));
     const loginStart = vi.fn(async () => ({
@@ -314,10 +430,10 @@ describe("subscription usage page", () => {
       if (provider === "claude") {
         expect(quotas.getByText("Fable · weekly")).toBeTruthy();
         expect(quotas.getByText("Extra usage")).toBeTruthy();
-        expect(quotas.getByText("$2.00 / $20.00")).toBeTruthy();
+        expect(quotas.getByText("$2.00 / $20.00 at last reading")).toBeTruthy();
       } else {
         expect(quotas.getByText("Credit balance")).toBeTruthy();
-        expect(quotas.getByText("400 credits left")).toBeTruthy();
+        expect(quotas.getByText("400 credits left at last reading")).toBeTruthy();
       }
     },
   );
@@ -673,9 +789,31 @@ describe("subscription usage page", () => {
         },
       },
     );
-    await slot.findByText("75% used");
+    await slot.findByText("75% used at last reading");
     expect(slot.getByText(/Last known usage/)).toBeTruthy();
     expect(slot.getByText(/Showing the last successful reading/)).toBeTruthy();
+    slot.lifecycle.unmount();
+  });
+
+  it.each(["failed refresh", "old reading", "reset passed"])("shows historical quotas without a current allowance (%s)", async (cause) => {
+    const app = await loadPluginApp(() => import("./app"));
+    const usage: AccountUsage = {
+      ...ready,
+      status: cause === "failed refresh" ? "error" : "ready",
+      error: cause === "failed refresh" ? "The CLI session expired. Sign in again." : null,
+      fetchedAt: cause === "old reading" ? now - 9 * 3600000 : now,
+      metrics: [{ label: "5-hour window", used: 11, remaining: 89, limit: 100, unit: "percent", resetAt: cause === "reset passed" ? now - 60000 : now + 3600000, windowMs: 5 * 3600000 }],
+    };
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, { rpc: { overview: () => fixture(usage) } });
+    expect(await slot.findByText("Current allowance unknown")).toBeTruthy();
+    expect(slot.getByText("11% used at last reading")).toBeTruthy();
+    expect(slot.queryByText("89% left")).toBeNull();
+    expect(slot.queryByText(/Limit in ~/)).toBeNull();
+    expect(slot.getByRole("progressbar").getAttribute("aria-valuetext")).not.toContain("remaining");
+    fireEvent.click(slot.getByRole("tab", { name: "All" }));
+    const quotas = within(slot.getByRole("region", { name: "Antigravity quotas" }));
+    expect(quotas.getByText("Current allowance unknown")).toBeTruthy();
+    expect(quotas.queryByText("89% left")).toBeNull();
     slot.lifecycle.unmount();
   });
 

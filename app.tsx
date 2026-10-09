@@ -1,6 +1,3 @@
-// Subscription Accounts page: one tab per AI subscription. Each provider swaps
-// its saved login file when quota runs out. Claude and Codex sign in through
-// their own CLIs, then this page saves that login.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
@@ -292,10 +289,19 @@ function formatAmount(value: number, unit: UsageMetric["unit"]): string {
   return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(value)} ${unit}`;
 }
 
-function QuotaMeter({ row, now }: { row: UsageMetric; now: number }) {
+function isHistoricalUsage(usage: AccountUsage, now: number): boolean {
+  return usage.status !== "ready" || usage.fetchedAt === null || now - usage.fetchedAt >= USAGE_TTL_MS;
+}
+
+function isLoginExpired(usage: AccountUsage): boolean {
+  return Boolean(usage.error && /sign in again|login expired|session expired|access expired/i.test(usage.error));
+}
+
+function QuotaMeter({ row, now, historical = false }: { row: UsageMetric; now: number; historical?: boolean }) {
   const percent = row.used !== null && row.limit !== null ? (row.used / row.limit) * 100 : null;
   const resetPassed = row.resetAt !== null && row.resetAt <= now;
-  const pace = quotaPace(row, now);
+  const lastReading = historical || resetPassed;
+  const pace = lastReading ? null : quotaPace(row, now);
   return (
     <div className="min-w-0 space-y-1.5">
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-xs">
@@ -310,22 +316,23 @@ function QuotaMeter({ row, now }: { row: UsageMetric; now: number }) {
               : row.limit !== null
                 ? `${formatAmount(row.limit, row.unit)} allowance`
                 : "Usage unavailable"}
+          {lastReading ? " at last reading" : ""}
         </span>
       </div>
       {percent !== null ? (
         <div
           role="progressbar"
-          aria-label={`${row.label} usage`}
+          aria-label={`${row.label} ${lastReading ? "last recorded usage" : "usage"}`}
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={Math.max(0, Math.min(100, percent))}
-          aria-valuetext={`${formatAmount(row.used!, row.unit)} used${row.remaining !== null ? `, ${formatAmount(row.remaining, row.unit)} remaining` : ""}`}
+          aria-valuetext={`${formatAmount(row.used!, row.unit)} used${lastReading ? " at last reading; current allowance unknown" : row.remaining !== null ? `, ${formatAmount(row.remaining, row.unit)} remaining` : ""}`}
           className="relative h-2 overflow-hidden rounded-full bg-muted"
         >
           <div
             className={cn(
               "h-full rounded-full",
-              percent >= 90 ? "bg-destructive" : percent >= 70 ? "bg-warning" : "bg-success",
+              lastReading ? "bg-muted-foreground/50" : percent >= 90 ? "bg-destructive" : percent >= 70 ? "bg-warning" : "bg-success",
             )}
             style={{ width: `${Math.max(0, Math.min(100, percent))}%` }}
           />
@@ -340,13 +347,15 @@ function QuotaMeter({ row, now }: { row: UsageMetric; now: number }) {
         </div>
       ) : null}
       <div className="flex flex-wrap justify-between gap-x-3 gap-y-1 text-xs text-muted-foreground">
-        {row.used !== null && row.remaining !== null ? (
+        {lastReading ? <span>Current allowance unknown</span> : row.used !== null && row.remaining !== null ? (
           <span className="tabular-nums">{formatAmount(row.remaining, row.unit)} left</span>
         ) : null}
         {row.used !== null && row.limit === null ? <span>Quota not reported</span> : null}
         {row.resetAt !== null ? (
           <span title={new Date(row.resetAt).toLocaleString()}>
-            {resetPassed ? "Reset passed · refresh usage" : `Resets in ${formatWait(row.resetAt - now)}`}
+            {resetPassed ? "Reset passed · refresh usage" : lastReading
+              ? `Recorded reset · ${new Date(row.resetAt).toLocaleString()}`
+              : `Resets in ${formatWait(row.resetAt - now)}`}
           </span>
         ) : percent !== null ? (
           <span>Reset time not reported</span>
@@ -385,9 +394,8 @@ function UsageDetails({
       setPending(false);
     }
   };
-  const stale =
-    usage.fetchedAt !== null && (now - usage.fetchedAt >= USAGE_TTL_MS || usage.status === "error");
-  const loginExpired = Boolean(actions && usage.error && /sign in again|login expired|session expired|access expired/i.test(usage.error));
+  const stale = isHistoricalUsage(usage, now);
+  const loginExpired = Boolean(actions && isLoginExpired(usage));
   const quotaRows = [...usage.metrics.filter((row) => !row.derivedFromModels), ...(usage.modelQuotas ?? [])];
   return (
     <div className="space-y-3 pt-2">
@@ -420,7 +428,7 @@ function UsageDetails({
       {quotaRows.length > 0 ? (
         <div className="grid grid-cols-1 gap-x-6 gap-y-4 sm:grid-cols-2">
           {quotaRows.map((row) => (
-            <QuotaMeter key={row.scope?.kind === "model" ? `model:${row.scope.model}` : row.label} row={row} now={now} />
+            <QuotaMeter key={row.scope?.kind === "model" ? `model:${row.scope.model}` : row.label} row={row} now={now} historical={stale} />
           ))}
         </div>
       ) : !usage.error ? (
@@ -524,6 +532,23 @@ function SignIn({
     event.preventDefault();
     if (code.trim()) void run(() => rpc.call("loginSubmit", { code }));
   };
+
+  if (disabled && !open && (provider === "claude" || provider === "codex")) {
+    if (account) return null;
+    return (
+      <p role="status" className="text-sm text-muted-foreground">
+        Install the {label} CLI on the bb server, then refresh this page. {" "}
+        <a
+          href={provider === "claude" ? "https://code.claude.com/docs/en/setup" : "https://developers.openai.com/codex/cli"}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex min-h-11 items-center underline focus-visible:outline-2 focus-visible:outline-ring"
+        >
+          Set up {label} CLI
+        </a>
+      </p>
+    );
+  }
 
   if (!open || status === "done") {
     return (
@@ -633,8 +658,6 @@ function SignIn({
   );
 }
 
-// ── Antigravity / Cursor / Grok ───────────────────────────────────────────
-
 function SwapTab({ section, data, rpc, run }: { section: SwapSection; data: Overview; rpc: Rpc; run: Run }) {
   const now = data.now;
   const target = (name: string) => ({ provider: section.id, name });
@@ -689,6 +712,7 @@ function SwapTab({ section, data, rpc, run }: { section: SwapSection; data: Over
         <AccountList empty={`No ${section.label} accounts yet. Add one below.`}>
           {section.accounts.map((account, index) => {
             const out = account.exhaustedUntil > now;
+            const loginExpired = isLoginExpired(account.usage);
             return (
               <li key={account.name} className="space-y-2 py-4">
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
@@ -718,19 +742,20 @@ function SwapTab({ section, data, rpc, run }: { section: SwapSection; data: Over
                     <span
                       className={cn(
                         "inline-flex items-center gap-1.5 text-xs",
-                        out
+                        out || loginExpired
                           ? "text-destructive"
                           : account.active
                             ? "text-foreground"
                             : "text-muted-foreground",
                       )}
                     >
-                      <Dot tone={out ? "bad" : account.active ? "good" : "idle"} />
-                      {account.active ? (out ? "In use · out of quota" : "In use") : null}
-                      {!account.active && out
+                      <Dot tone={out || loginExpired ? "bad" : account.active ? "good" : "idle"} />
+                      {loginExpired ? (account.active ? "In use · login expired" : "Login expired") : null}
+                      {account.active && !loginExpired ? (out ? "In use · out of quota" : "In use") : null}
+                      {!account.active && out && !loginExpired
                         ? `Out of quota · back in ${formatWait(account.exhaustedUntil - now)}`
                         : null}
-                      {!account.active && !out ? "Ready" : null}
+                      {!account.active && !out && !loginExpired ? "Ready" : null}
                     </span>
                   </div>
                   <div className="flex flex-wrap items-center gap-1.5">
@@ -780,9 +805,9 @@ function SwapTab({ section, data, rpc, run }: { section: SwapSection; data: Over
                     now={now}
                     name={account.name}
                     onRefresh={() => run(() => rpc.call("usageRefresh", target(account.name)))}
-                    actions={section.id !== "claude" && section.id !== "codex" ? (
+                    actions={(
                       <SignIn provider={section.id} label={section.label} account={account} login={data.login} rpc={rpc} run={run} disabled={!section.installed} />
-                    ) : undefined}
+                    )}
                   />
                 </div>
               </li>
@@ -791,18 +816,14 @@ function SwapTab({ section, data, rpc, run }: { section: SwapSection; data: Over
         </AccountList>
       </section>
 
-      {section.id === "claude" || section.id === "codex" ? (
-        <p className="text-sm text-muted-foreground">Sign in with the CLI, then choose Save it.</p>
-      ) : (
-        <SignIn
-          provider={section.id}
-          label={section.label}
-          login={data.login}
-          rpc={rpc}
-          run={run}
-          disabled={!section.installed}
-        />
-      )}
+      <SignIn
+        provider={section.id}
+        label={section.label}
+        login={data.login}
+        rpc={rpc}
+        run={run}
+        disabled={!section.installed}
+      />
     </div>
   );
 }
@@ -1172,9 +1193,7 @@ function AllQuotas({ data, onOpenProvider }: { data: Overview; onOpenProvider: (
               <div className="space-y-4">
                 {usageRows.map(({ key, name, usage }) => {
                   const quotaRows = [...usage.metrics.filter((row) => !row.derivedFromModels), ...(usage.modelQuotas ?? [])];
-                  const loginExpired =
-                    Boolean(usage.error) &&
-                    /sign in again|login expired|session expired|access expired/i.test(usage.error!);
+                  const loginExpired = isLoginExpired(usage);
                   return (
                   <div key={key} className="space-y-2">
                     <p className="break-words text-xs text-muted-foreground">
@@ -1188,6 +1207,7 @@ function AllQuotas({ data, onOpenProvider }: { data: Overview; onOpenProvider: (
                             key={metric.scope?.kind === "model" ? `model:${metric.scope.model}` : metric.label}
                             row={metric}
                             now={data.now}
+                            historical={isHistoricalUsage(usage, data.now)}
                           />
                         ))}
                       </div>
@@ -1228,12 +1248,12 @@ function AllQuotas({ data, onOpenProvider }: { data: Overview; onOpenProvider: (
                     </p>
                     <div className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
                       {localExtraMetrics.map((metric) => (
-                        <QuotaMeter key={metric.label} row={metric} now={data.now} />
+                        <QuotaMeter key={metric.label} row={metric} now={data.now} historical={isHistoricalUsage(local.usage, data.now)} />
                       ))}
                     </div>
                     {local.usage.error ? (
                       <p className="break-words text-xs text-destructive">
-                        {/sign in again|login expired|session expired|access expired/i.test(local.usage.error)
+                        {isLoginExpired(local.usage)
                           ? "Login expired. Log in again to load usage."
                           : local.usage.error}{" "}
                         · Last known usage

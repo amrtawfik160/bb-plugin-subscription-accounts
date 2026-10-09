@@ -45,11 +45,18 @@ Demo screenshots use sample accounts and usage.
   queued and runs again when the first account resets.
 - **Adds accounts from the page.** Click **Add account**, sign in on the
   provider's page, and the login is saved. Your current login on the machine
-  is never touched or logged out.
-- **Renews an expired login.** **Log in again** on an Antigravity, Cursor, or
-  Grok account reauthenticates that same saved account, keeps its name, order
-  and active selection, then refreshes usage. Claude and Codex still use their
-  CLI login, then **Save it**.
+  is never touched or logged out. **Add Claude account** uses a browser link
+  and pasted consent code. **Add Codex account** uses a browser link and device
+  code. Page-added Claude and Codex accounts stay Ready until you choose
+  **Use now**. Cancel before saving keeps the existing accounts.
+- **Renews an expired login.** **Log in again** reauthenticates that same saved
+  account through its provider CLI, keeps its name, order and active selection,
+  then refreshes usage. Claude uses a browser link and pasted consent code.
+  Codex uses a browser link and device code. Sign-in runs in an isolated folder.
+  A different account is rejected. Cancel before saving keeps the saved login.
+- **Labels historical quotas.** Failed or old readings retain recorded usage
+  and reset times. Their current allowance is unknown. A passed reset also
+  makes the allowance unknown until a new reading reports the next window.
 - **Lets you manage the list by hand.** Reorder accounts, switch now, skip to
   the next one, clear an out-of-quota mark, or remove an account.
 - **Switches the machine login.** Choosing an account writes that provider's
@@ -77,8 +84,8 @@ Demo screenshots use sample accounts and usage.
 | **Antigravity** (`acp-antigravity`) | This plugin swaps agy's login file | Google link, then paste the code (60s window) |
 | **Cursor** (`acp-cursor`) | This plugin swaps Cursor's login file | Cursor link, finish in the browser |
 | **Grok** (`acp-grok`) | This plugin swaps Grok's login file | x.ai link plus a device code |
-| **Claude Code** | This plugin swaps Claude's login file | Sign in with the Claude CLI, then choose Save it |
-| **Codex** | This plugin swaps Codex's login file | Sign in with the Codex CLI, then choose Save it |
+| **Claude Code** | This plugin swaps Claude's login file | Claude link, then paste the consent code |
+| **Codex** | This plugin swaps Codex's login file | OpenAI link plus a device code |
 
 **Antigravity, Cursor and Grok** each keep their login in one file on the bb
 server machine (`~/.gemini/antigravity-cli/antigravity-oauth-token`,
@@ -90,13 +97,15 @@ that reads the new login.
 **Claude Code and Codex** keep their logins in `~/.claude/.credentials.json`
 (and `~/.claude.json`) and `~/.codex/auth.json`. This plugin saves a copy of
 each login and swaps the file when a 5-hour or weekly limit is hit. New threads
-use that login directly. The Account Pooler stays off. Sign in with the CLI,
-then choose **Save it** on the Claude or Codex tab.
+use that login directly. The Account Pooler stays off. Choose **Add Claude
+account** or **Add Codex account** to sign in from the page; the new account
+stays inactive until **Use now**. To save a login already on the machine,
+choose **Save it** on that provider's tab.
 
 ## Install
 
 Requires bb 0.44 or newer, and the provider CLIs you want to use (`agy`,
-`cursor-agent`, `grok`) installed and signed in on the bb server machine.
+`cursor-agent`, `grok`, `claude`, `codex`) installed on the bb server machine.
 Antigravity threads also need the
 [Antigravity plugin](https://github.com/amrtawfik160/bb-plugin-antigravity).
 

@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createFakePluginHost, makeTurnFailedEvent } from "@get-bb/plugin-sdk/testing";
 import { DatabaseSync } from "node:sqlite";
-import plugin from "./server";
+import plugin, { rpcContract } from "./server";
 
 const billing = {
   config: {
@@ -114,6 +114,105 @@ sleep 5
     expect(await fs.readFile(file, "utf8")).toBe(savedLogin);
   });
 
+  it.each([true, false])("recovers a saved Claude CLI account in isolation (active: %s)", async (active) => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ five_hour: { utilization: 3, resets_at: new Date(Date.now() + 3600000).toISOString() } })));
+    const { harness } = await setup();
+    const file = path.join(home!, ".claude/.credentials.json");
+    const profileFile = path.join(home!, ".claude.json");
+    const credentials = (token: string) => JSON.stringify({ claudeAiOauth: { accessToken: token, refreshToken: `${token}-refresh`, expiresAt: Date.now() + 3600000 } });
+    const old = credentials("old-access");
+    const other = credentials("other-access");
+    const fresh = credentials("fresh-access");
+    await fs.mkdir(path.dirname(file));
+    for (const [name, body] of [["test", old], ["other", other]]) {
+      await fs.writeFile(file, body);
+      await fs.writeFile(profileFile, JSON.stringify({ theme: "dark", oauthAccount: { accountUuid: `uuid-${name}`, emailAddress: `${name}@example.com` } }));
+      await harness.behavior.callRpc("saveCurrent", { provider: "claude" });
+    }
+    await harness.behavior.callRpc("use", { provider: "claude", name: active ? "test" : "other" });
+    const beforeProfile = await fs.readFile(profileFile, "utf8");
+    const bin = path.join(home!, "fake-bin");
+    await fs.mkdir(bin);
+    await fs.writeFile(path.join(bin, "claude"), `#!/bin/sh
+[ "$1 $2 $3" = "auth login --claudeai" ] || exit 1
+[ "$CLAUDE_CONFIG_DIR" = "$HOME/.claude" ] || exit 1
+[ -z "$CLAUDE_CODE_OAUTH_REFRESH_TOKEN" ] || exit 1
+printf '%s\\n' 'https://claude.ai/oauth/authorize?fixture=1'
+read code
+[ "$code" = 'fixture-code#fixture-state' ] || exit 1
+mkdir -p "$CLAUDE_CONFIG_DIR"
+printf '%s' '${fresh}' > "$CLAUDE_CONFIG_DIR/.credentials.json"
+printf '%s' '{"oauthAccount":{"accountUuid":"uuid-test","emailAddress":"test@example.com"}}' > "$CLAUDE_CONFIG_DIR/.claude.json"
+sleep 5
+`, { mode: 0o700 });
+    vi.stubEnv("PATH", `${bin}:/usr/bin:/bin`);
+    vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(home!, "owner-config"));
+    vi.stubEnv("CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "owner-fixture-refresh");
+    expect(await harness.behavior.callRpc("loginStart", { provider: "claude", name: "test" })).toMatchObject({ targetAccount: "test" });
+    await vi.waitFor(async () => expect((await harness.behavior.callRpc("overview", null) as any).login.status).toBe("waiting"));
+    await harness.behavior.callRpc("loginSubmit", { code: "fixture-code#fixture-state" });
+    await vi.waitFor(async () => {
+      const view: any = await harness.behavior.callRpc("overview", null);
+      expect(view.login).toMatchObject({ status: "done", account: "test" });
+      const section = view.swap.find((s: any) => s.id === "claude");
+      expect(section.active).toBe(active ? "test" : "other");
+      expect(section.accounts.map((a: any) => a.name)).toEqual(["test", "other"]);
+      expect(section.accounts[0].usage.status).toBe("ready");
+    }, { timeout: 8000 });
+    expect(await fs.readFile(file, "utf8")).toBe(active ? fresh : other);
+    expect(await fs.readFile(profileFile, "utf8")).toBe(beforeProfile);
+    await harness.behavior.callRpc("use", { provider: "claude", name: "test" });
+    expect(await fs.readFile(file, "utf8")).toBe(fresh);
+  });
+
+  it.each(["success", "wrong organization", "cancel"])("keeps Codex account identity and active selection on recovery (%s)", async (result) => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({})));
+    const { harness } = await setup();
+    const file = path.join(home!, ".codex/auth.json");
+    const credentials = (id: string, token: string) => JSON.stringify({ tokens: {
+      account_id: id, access_token: token, refresh_token: `${token}-refresh`,
+      id_token: `h.${Buffer.from(JSON.stringify({ email: "test@example.com" })).toString("base64url")}.s`,
+    } });
+    const old = credentials("uuid-test", "old-access");
+    const other = credentials("uuid-other", "other-access");
+    const fresh = credentials(result === "wrong organization" ? "uuid-wrong" : "uuid-test", "fresh-access");
+    await fs.mkdir(path.dirname(file));
+    await fs.writeFile(file, old);
+    const { name } = rpcContract.saveCurrent.output.parse(await harness.behavior.callRpc("saveCurrent", { provider: "codex" }));
+    await fs.writeFile(file, other);
+    const added = rpcContract.saveCurrent.output.parse(await harness.behavior.callRpc("saveCurrent", { provider: "codex" }));
+    await harness.behavior.callRpc("use", { provider: "codex", name: added.name });
+    const bin = path.join(home!, "fake-bin");
+    await fs.mkdir(bin);
+    await fs.writeFile(path.join(bin, "codex"), `#!/bin/sh
+[ "$1 $2 $3 $4 $5" = 'login --device-auth -c cli_auth_credentials_store="file" ' ] || exit 1
+[ "$CODEX_HOME" = "$HOME/.codex" ] || exit 1
+[ -z "$OPENAI_API_KEY" ] || exit 1
+printf '%s\\n' 'https://auth.openai.com/codex/device' 'ABCD-1234'
+sleep ${result === "cancel" ? 5 : 0.2}
+mkdir -p "$CODEX_HOME"
+printf '%s' '${fresh}' > "$CODEX_HOME/auth.json"
+sleep 5
+`, { mode: 0o700 });
+    vi.stubEnv("PATH", `${bin}:/usr/bin:/bin`);
+    vi.stubEnv("CODEX_HOME", path.join(home!, "owner-config"));
+    vi.stubEnv("OPENAI_API_KEY", "owner-fixture-key");
+    await harness.behavior.callRpc("loginStart", { provider: "codex", name });
+    await vi.waitFor(async () => expect((await harness.behavior.callRpc("overview", null) as any).login).toMatchObject({ status: "waiting", userCode: "ABCD-1234" }));
+    if (result === "cancel") {
+      expect(await harness.behavior.callRpc("loginCancel", null)).toEqual({ kept: true });
+    } else {
+      await vi.waitFor(async () => expect((await harness.behavior.callRpc("overview", null) as any).login.status).toBe(result === "success" ? "done" : "failed"), { timeout: 8000 });
+    }
+    const view: any = await harness.behavior.callRpc("overview", null);
+    const section = view.swap.find((s: any) => s.id === "codex");
+    expect(section.active).toBe(added.name);
+    expect(section.accounts.map((a: any) => a.name)).toEqual([name, added.name]);
+    expect(await fs.readFile(file, "utf8")).toBe(other);
+    await harness.behavior.callRpc("use", { provider: "codex", name });
+    expect(await fs.readFile(file, "utf8")).toBe(result === "success" ? fresh : old);
+  });
+
   it("keeps saved credentials when a re-login is cancelled and prevents competing sessions", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => Response.json(billing)));
     const { file, harness } = await setup();
@@ -127,6 +226,122 @@ sleep 5
     expect(await fs.readFile(file, "utf8")).toBe(savedLogin);
     await harness.behavior.callRpc("use", { provider: "grok", name: "test" });
     expect(await fs.readFile(file, "utf8")).toBe(savedLogin);
+  });
+
+  it.each([
+    ["claude", "success"], ["codex", "success"],
+    ["claude", "cancel"], ["codex", "cancel"],
+    ["claude", "missing identity"], ["codex", "missing identity"],
+  ] as const)("adds a %s account without changing existing accounts or machine login (%s)", async (provider, outcome) => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({})));
+    const { harness } = await setup();
+    const credentials = (id: string | null, token: string, email: string) => JSON.stringify(provider === "claude"
+      ? { claudeAiOauth: { accessToken: token, refreshToken: `${token}-refresh`, expiresAt: Date.now() + 3600000 } }
+      : { tokens: { account_id: id, access_token: token, refresh_token: `${token}-refresh`,
+        id_token: `h.${Buffer.from(JSON.stringify({ email })).toString("base64url")}.s` } });
+    const oldEmail = provider === "codex" ? "same@example.com" : "existing@example.com";
+    const newEmail = provider === "codex" ? oldEmail : "new@example.com";
+    const old = credentials("existing-org", "old-access", oldEmail);
+    const fresh = credentials(outcome === "missing identity" ? null : "new-org", "fresh-access", newEmail);
+    const relativeFile = provider === "claude" ? ".claude/.credentials.json" : ".codex/auth.json";
+    const file = path.join(home!, relativeFile);
+    await fs.mkdir(path.dirname(file));
+    await fs.writeFile(file, old);
+    const profileFile = path.join(home!, ".claude.json");
+    const oldProfile = JSON.stringify({ theme: "dark", oauthAccount: { accountUuid: "existing-org", emailAddress: oldEmail } });
+    if (provider === "claude") await fs.writeFile(profileFile, oldProfile);
+    const saved = rpcContract.saveCurrent.output.parse(await harness.behavior.callRpc("saveCurrent", { provider }));
+    const bin = path.join(home!, "fake-bin");
+    await fs.mkdir(bin);
+    const profile = JSON.stringify({ oauthAccount: { accountUuid: outcome === "missing identity" ? null : "new-org", emailAddress: newEmail } });
+    await fs.writeFile(path.join(bin, provider), `#!/bin/sh
+printf '%s\\n' '${provider === "claude" ? "https://claude.ai/oauth/authorize?fixture=add" : "https://auth.openai.com/codex/device"}' 'ABCD-1234'
+${provider === "claude" ? "read code" : `sleep ${outcome === "cancel" ? 5 : 0.2}`}
+mkdir -p "$HOME/${path.dirname(relativeFile)}"
+printf '%s' '${fresh}' > "$HOME/${relativeFile}"
+${provider === "claude" ? `printf '%s' '${profile}' > "$CLAUDE_CONFIG_DIR/.claude.json"` : ""}
+sleep 5
+`, { mode: 0o700 });
+    vi.stubEnv("PATH", `${bin}:/usr/bin:/bin`);
+    await harness.behavior.callRpc("loginStart", { provider });
+    await vi.waitFor(async () => {
+      const view = rpcContract.overview.output.parse(await harness.behavior.callRpc("overview", null));
+      expect(view.login).toMatchObject({ status: "waiting", targetAccount: null });
+    });
+    if (outcome === "cancel") {
+      expect(await harness.behavior.callRpc("loginCancel", null)).toEqual({ kept: true });
+    } else {
+      if (provider === "claude") await harness.behavior.callRpc("loginSubmit", { code: "fixture#state" });
+      await vi.waitFor(async () => {
+        const view = rpcContract.overview.output.parse(await harness.behavior.callRpc("overview", null));
+        expect(view.login?.status).toBe(outcome === "success" ? "done" : "failed");
+      }, { timeout: 8000 });
+    }
+    const view = rpcContract.overview.output.parse(await harness.behavior.callRpc("overview", null));
+    const section = view.swap.find((s) => s.id === provider)!;
+    expect(section.active).toBe(saved.name);
+    expect(section.accounts.map((a) => a.name)).toEqual(outcome === "success" ? [saved.name, provider === "codex" ? "same-2" : "new"] : [saved.name]);
+    expect(await fs.readFile(file, "utf8")).toBe(old);
+    if (provider === "claude") expect(await fs.readFile(profileFile, "utf8")).toBe(oldProfile);
+    if (outcome === "success") {
+      await harness.behavior.callRpc("use", { provider, name: section.accounts[1].name });
+      expect(await fs.readFile(file, "utf8")).toBe(fresh);
+    } else if (outcome === "missing identity") {
+      expect(view.login?.error).toBe("Sign-in did not save a verified account identity. Try again.");
+    }
+  });
+
+  it.each(["claude", "codex"] as const)("keeps an empty-pool page-added %s account inactive until Use now", async (provider) => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({})));
+    const { harness } = await setup();
+    const credentials = (id: string, token: string, email: string) => JSON.stringify(provider === "claude"
+      ? { claudeAiOauth: { accessToken: token, refreshToken: `${token}-refresh`, expiresAt: Date.now() + 3600000 } }
+      : { tokens: { account_id: id, access_token: token, refresh_token: `${token}-refresh`,
+        id_token: `h.${Buffer.from(JSON.stringify({ email })).toString("base64url")}.s` } });
+    const machine = credentials("machine-org", "machine-access", "machine@example.com");
+    const fresh = credentials("new-org", "fresh-access", "new@example.com");
+    const relativeFile = provider === "claude" ? ".claude/.credentials.json" : ".codex/auth.json";
+    const file = path.join(home!, relativeFile);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, machine);
+    const profileFile = path.join(home!, ".claude.json");
+    const machineProfile = JSON.stringify({ theme: "dark", oauthAccount: { accountUuid: "machine-org", emailAddress: "machine@example.com" } });
+    if (provider === "claude") await fs.writeFile(profileFile, machineProfile);
+    const bin = path.join(home!, "fake-bin");
+    await fs.mkdir(bin);
+    const profile = JSON.stringify({ oauthAccount: { accountUuid: "new-org", emailAddress: "new@example.com" } });
+    await fs.writeFile(path.join(bin, provider), `#!/bin/sh
+printf '%s\\n' '${provider === "claude" ? "https://claude.ai/oauth/authorize?fixture=empty" : "https://auth.openai.com/codex/device"}' 'ABCD-1234'
+${provider === "claude" ? "read code" : "sleep 0.2"}
+mkdir -p "$HOME/${path.dirname(relativeFile)}"
+printf '%s' '${fresh}' > "$HOME/${relativeFile}"
+${provider === "claude" ? `printf '%s' '${profile}' > "$CLAUDE_CONFIG_DIR/.claude.json"` : ""}
+sleep 5
+`, { mode: 0o700 });
+    vi.stubEnv("PATH", `${bin}:/usr/bin:/bin`);
+    await harness.behavior.callRpc("loginStart", { provider });
+    await vi.waitFor(async () => {
+      const view = rpcContract.overview.output.parse(await harness.behavior.callRpc("overview", null));
+      expect(view.login).toMatchObject({ status: "waiting", targetAccount: null });
+    });
+    if (provider === "claude") await harness.behavior.callRpc("loginSubmit", { code: "fixture#state" });
+    await vi.waitFor(async () => {
+      const view = rpcContract.overview.output.parse(await harness.behavior.callRpc("overview", null));
+      expect(view.login?.status).toBe("done");
+    }, { timeout: 8000 });
+    const afterAdd = rpcContract.overview.output.parse(await harness.behavior.callRpc("overview", null));
+    const section = afterAdd.swap.find((s) => s.id === provider)!;
+    expect(section.active).toBeNull();
+    expect(section.accounts).toHaveLength(1);
+    expect(section.accounts[0]).toMatchObject({ active: false, name: expect.any(String) });
+    expect(await fs.readFile(file, "utf8")).toBe(machine);
+    if (provider === "claude") expect(await fs.readFile(profileFile, "utf8")).toBe(machineProfile);
+    await harness.behavior.callRpc("use", { provider, name: section.accounts[0].name });
+    const afterUse = rpcContract.overview.output.parse(await harness.behavior.callRpc("overview", null));
+    const used = afterUse.swap.find((s) => s.id === provider)!;
+    expect(used.active).toBe(section.accounts[0].name);
+    expect(used.accounts[0].active).toBe(true);
+    expect(await fs.readFile(file, "utf8")).toBe(fresh);
   });
 
   it("keeps saved and live credentials when cancel wins during a delayed credential save", async () => {
@@ -716,7 +931,8 @@ describe("Claude and Codex direct switching", () => {
     });
     expect(codexEnv.map((entry) => entry.name)).toEqual(["CODEX_OPENAI_BASE_URL", "CODEX_POOL_AUTH_TOKEN"]);
     await expect(created.harness.behavior.callRpc("poolEnable", null)).rejects.toThrow(/Account Pooler/);
-    await expect(created.harness.behavior.callRpc("loginStart", { provider: "claude" })).rejects.toThrow(/CLI/);
+    vi.stubEnv("PATH", path.join(home, "missing-bin"));
+    await expect(created.harness.behavior.callRpc("loginStart", { provider: "claude" })).rejects.toThrow(/not installed/);
     const reloaded = await created.harness.lifecycle.reload(plugin);
     dispose = () => reloaded.harness.lifecycle.dispose();
     const again = await reloaded.harness.behavior.callRpc("overview", null) as typeof overview;
