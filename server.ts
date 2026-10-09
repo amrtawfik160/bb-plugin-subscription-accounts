@@ -321,6 +321,11 @@ export default async function plugin(bb: BbPluginApi) {
     bb.realtime.publish(CHANGED, null);
   }
 
+  // Background refreshes are not awaited; a rejection must never reach the host process.
+  function logBackground(error: unknown): void {
+    bb.log.warn(`Background refresh failed: ${(error as Error)?.message ?? String(error)}`);
+  }
+
   // Every pool mutation goes through this chain, so concurrent failures from
   // several threads on the same exhausted account switch only once.
   let chain: Promise<unknown> = Promise.resolve();
@@ -810,6 +815,7 @@ export default async function plugin(bb: BbPluginApi) {
             return saved;
           },
           expected?.name ?? null,
+          (message) => bb.log.warn(message),
         );
         swapLogin = session;
         login = { ...session.state };
@@ -1170,9 +1176,9 @@ export default async function plugin(bb: BbPluginApi) {
         return null;
       }
       const key = localUsageKey(provider, body)!;
-      void usage.refresh(key, () =>
+      usage.refresh(key, () =>
         fetchLocalUsage(provider, body, localCredentialStore(provider)),
-      );
+      ).catch(logBackground);
       const matched = accounts.find((a) =>
         a.provider === provider && (local.accountId
           ? poolAccountIdentity(a) === local.accountId
@@ -1243,7 +1249,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.rpc.register(rpcContract, {
     overview: async () => {
-      for (const id of ["claude", "codex", "grok"] as const) void history.refresh(id);
+      for (const id of ["claude", "codex", "grok"] as const) history.refresh(id).catch(logBackground);
       const swap = await Promise.all(
         STACK_IDS.map(async (id) => {
           const login = fileLoginFor(id);
@@ -1284,7 +1290,7 @@ export default async function plugin(bb: BbPluginApi) {
                 lastActivatedAt: meta.lastActivatedAt,
                 addedAt: meta.addedAt,
                 usage: (() => {
-                  void refreshUsage(id, name);
+                  refreshUsage(id, name).catch(logBackground);
                   return usage.get(usageKey(id, name));
                 })(),
               };
