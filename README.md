@@ -46,10 +46,14 @@ Demo screenshots use sample accounts and usage.
 - **Adds accounts from the page.** Click **Add account**, sign in on the
   provider's page, and the login is saved. Your current login on the machine
   is never touched or logged out.
-- **Renews an expired login.** **Log in again** on an Antigravity, Cursor, or
-  Grok account reauthenticates that same saved account, keeps its name, order
-  and active selection, then refreshes usage. Claude and Codex still use their
-  CLI login, then **Save it**.
+- **Renews an expired login.** **Log in again** reauthenticates that same saved
+  account through its provider CLI, keeps its name, order and active selection,
+  then refreshes usage. Claude uses a browser link and pasted consent code.
+  Codex uses a browser link and device code. Sign-in runs in an isolated folder.
+  A different account is rejected. Cancel before saving keeps the saved login.
+- **Labels historical quotas.** Failed or old readings retain recorded usage
+  and reset times. Their current allowance is unknown. A passed reset also
+  makes the allowance unknown until a new reading reports the next window.
 - **Lets you manage the list by hand.** Reorder accounts, switch now, skip to
   the next one, clear an out-of-quota mark, or remove an account.
 - **Switches the machine login.** Choosing an account writes that provider's

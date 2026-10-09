@@ -292,10 +292,15 @@ function formatAmount(value: number, unit: UsageMetric["unit"]): string {
   return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(value)} ${unit}`;
 }
 
-function QuotaMeter({ row, now }: { row: UsageMetric; now: number }) {
+function isHistoricalUsage(usage: AccountUsage, now: number): boolean {
+  return usage.status !== "ready" || usage.fetchedAt === null || now - usage.fetchedAt >= USAGE_TTL_MS;
+}
+
+function QuotaMeter({ row, now, historical = false }: { row: UsageMetric; now: number; historical?: boolean }) {
   const percent = row.used !== null && row.limit !== null ? (row.used / row.limit) * 100 : null;
   const resetPassed = row.resetAt !== null && row.resetAt <= now;
-  const pace = quotaPace(row, now);
+  const lastReading = historical || resetPassed;
+  const pace = lastReading ? null : quotaPace(row, now);
   return (
     <div className="min-w-0 space-y-1.5">
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-xs">
@@ -310,22 +315,23 @@ function QuotaMeter({ row, now }: { row: UsageMetric; now: number }) {
               : row.limit !== null
                 ? `${formatAmount(row.limit, row.unit)} allowance`
                 : "Usage unavailable"}
+          {lastReading ? " at last reading" : ""}
         </span>
       </div>
       {percent !== null ? (
         <div
           role="progressbar"
-          aria-label={`${row.label} usage`}
+          aria-label={`${row.label} ${lastReading ? "last recorded usage" : "usage"}`}
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={Math.max(0, Math.min(100, percent))}
-          aria-valuetext={`${formatAmount(row.used!, row.unit)} used${row.remaining !== null ? `, ${formatAmount(row.remaining, row.unit)} remaining` : ""}`}
+          aria-valuetext={`${formatAmount(row.used!, row.unit)} used${lastReading ? " at last reading; current allowance unknown" : row.remaining !== null ? `, ${formatAmount(row.remaining, row.unit)} remaining` : ""}`}
           className="relative h-2 overflow-hidden rounded-full bg-muted"
         >
           <div
             className={cn(
               "h-full rounded-full",
-              percent >= 90 ? "bg-destructive" : percent >= 70 ? "bg-warning" : "bg-success",
+              lastReading ? "bg-muted-foreground/50" : percent >= 90 ? "bg-destructive" : percent >= 70 ? "bg-warning" : "bg-success",
             )}
             style={{ width: `${Math.max(0, Math.min(100, percent))}%` }}
           />
@@ -340,13 +346,15 @@ function QuotaMeter({ row, now }: { row: UsageMetric; now: number }) {
         </div>
       ) : null}
       <div className="flex flex-wrap justify-between gap-x-3 gap-y-1 text-xs text-muted-foreground">
-        {row.used !== null && row.remaining !== null ? (
+        {lastReading ? <span>Current allowance unknown</span> : row.used !== null && row.remaining !== null ? (
           <span className="tabular-nums">{formatAmount(row.remaining, row.unit)} left</span>
         ) : null}
         {row.used !== null && row.limit === null ? <span>Quota not reported</span> : null}
         {row.resetAt !== null ? (
           <span title={new Date(row.resetAt).toLocaleString()}>
-            {resetPassed ? "Reset passed · refresh usage" : `Resets in ${formatWait(row.resetAt - now)}`}
+            {resetPassed ? "Reset passed · refresh usage" : lastReading
+              ? `Recorded reset · ${new Date(row.resetAt).toLocaleString()}`
+              : `Resets in ${formatWait(row.resetAt - now)}`}
           </span>
         ) : percent !== null ? (
           <span>Reset time not reported</span>
@@ -385,8 +393,7 @@ function UsageDetails({
       setPending(false);
     }
   };
-  const stale =
-    usage.fetchedAt !== null && (now - usage.fetchedAt >= USAGE_TTL_MS || usage.status === "error");
+  const stale = isHistoricalUsage(usage, now);
   const loginExpired = Boolean(actions && usage.error && /sign in again|login expired|session expired|access expired/i.test(usage.error));
   const quotaRows = [...usage.metrics.filter((row) => !row.derivedFromModels), ...(usage.modelQuotas ?? [])];
   return (
@@ -420,7 +427,7 @@ function UsageDetails({
       {quotaRows.length > 0 ? (
         <div className="grid grid-cols-1 gap-x-6 gap-y-4 sm:grid-cols-2">
           {quotaRows.map((row) => (
-            <QuotaMeter key={row.scope?.kind === "model" ? `model:${row.scope.model}` : row.label} row={row} now={now} />
+            <QuotaMeter key={row.scope?.kind === "model" ? `model:${row.scope.model}` : row.label} row={row} now={now} historical={stale} />
           ))}
         </div>
       ) : !usage.error ? (
@@ -1188,6 +1195,7 @@ function AllQuotas({ data, onOpenProvider }: { data: Overview; onOpenProvider: (
                             key={metric.scope?.kind === "model" ? `model:${metric.scope.model}` : metric.label}
                             row={metric}
                             now={data.now}
+                            historical={isHistoricalUsage(usage, data.now)}
                           />
                         ))}
                       </div>
@@ -1228,7 +1236,7 @@ function AllQuotas({ data, onOpenProvider }: { data: Overview; onOpenProvider: (
                     </p>
                     <div className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
                       {localExtraMetrics.map((metric) => (
-                        <QuotaMeter key={metric.label} row={metric} now={data.now} />
+                        <QuotaMeter key={metric.label} row={metric} now={data.now} historical={isHistoricalUsage(local.usage, data.now)} />
                       ))}
                     </div>
                     {local.usage.error ? (

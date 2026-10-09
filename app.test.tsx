@@ -335,10 +335,10 @@ describe("subscription usage page", () => {
       if (provider === "claude") {
         expect(quotas.getByText("Fable · weekly")).toBeTruthy();
         expect(quotas.getByText("Extra usage")).toBeTruthy();
-        expect(quotas.getByText("$2.00 / $20.00")).toBeTruthy();
+        expect(quotas.getByText("$2.00 / $20.00 at last reading")).toBeTruthy();
       } else {
         expect(quotas.getByText("Credit balance")).toBeTruthy();
-        expect(quotas.getByText("400 credits left")).toBeTruthy();
+        expect(quotas.getByText("400 credits left at last reading")).toBeTruthy();
       }
     },
   );
@@ -694,7 +694,7 @@ describe("subscription usage page", () => {
         },
       },
     );
-    await slot.findByText("75% used");
+    await slot.findByText("75% used at last reading");
     expect(slot.getByText(/Last known usage/)).toBeTruthy();
     expect(slot.getByText(/Showing the last successful reading/)).toBeTruthy();
     slot.lifecycle.unmount();

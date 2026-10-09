@@ -1291,7 +1291,7 @@ export default async function plugin(bb: BbPluginApi) {
           return {
             id,
             label: login.label,
-            installed: (await findBinary(binary)) !== null || captured !== null,
+            installed: (await findBinary(binary)) !== null,
             active: state.active,
             accounts: state.order.map((name) => {
               const meta = state.accounts[name];
