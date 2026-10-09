@@ -46,6 +46,10 @@ Demo screenshots use sample accounts and usage.
 - **Adds accounts from the page.** Click **Add account**, sign in on the
   provider's page, and the login is saved. Your current login on the machine
   is never touched or logged out.
+- **Renews an expired login.** **Log in again** on an Antigravity, Cursor, or
+  Grok account reauthenticates that same saved account, keeps its name, order
+  and active selection, then refreshes usage. Claude and Codex still use their
+  CLI login, then **Save it**.
 - **Lets you manage the list by hand.** Reorder accounts, switch now, skip to
   the next one, clear an out-of-quota mark, or remove an account.
 - **Switches the machine login.** Choosing an account writes that provider's
@@ -132,16 +136,17 @@ Under **Settings → Plugins → Subscription Accounts**, or with
 |---|---|---|
 | `autoSwitch` | `true` | Switch and retry automatically on quota errors |
 | `fallbackCooldownMinutes` | `60` | How long an account counts as used up when the error has no reset time |
-| `antigravityOAuthClientId` / `antigravityOAuthClientSecret` | Unset | Protected OAuth client settings for refreshing Antigravity usage access; otherwise refresh the CLI login |
+| `antigravityOAuthClientId` / `antigravityOAuthClientSecret` | Unset | Protected OAuth client settings for refreshing Antigravity usage access; otherwise use **Log in again** or refresh the CLI login |
 
 ## Usage data
 
 Antigravity shows shared Gemini and Claude pool quotas, with weekly windows
-when its API supports them. Cursor shows billing-cycle usage, model allowances,
-on-demand spend and credit grants; request-based plans use the dashboard
-fallback. Grok shows its unified weekly pool and any pay-as-you-go cap. Claude
-and Codex show usage from the saved login, and the machine's current login
-also shows usage before you save it.
+when its API supports them, and per-model remaining when the provider reports
+it. Cursor shows billing-cycle usage, model allowances, on-demand spend and
+credit grants; request-based plans use the dashboard fallback. Grok shows its
+unified weekly pool and any pay-as-you-go cap. Claude and Codex show usage from
+the saved login, and the machine's current login also shows usage before you
+save it.
 
 The adapters were researched from [OpenUsage](https://github.com/robinebers/openusage).
 They call each provider directly from the bb server using that account's saved
@@ -218,6 +223,7 @@ bb plugin install . --yes     # or: bb plugin reload subscription-accounts
 | `pooler.ts` | Reads Account Pooler metadata. It does not turn that plugin on |
 | `server.ts` | Storage, automatic switching, page RPC, `bb subs` CLI |
 | `app.tsx` | The Subscription Accounts page |
+| `quotas.ts` | `bb subs quota` report shaping and text rendering |
 | `usage.ts` | Normalized quota metrics, provider mappers and five-minute cache |
 | `usage-client.ts` | Server-only provider requests and token refresh |
 
