@@ -33,6 +33,7 @@ export interface LoginState {
 
 const URL_TIMEOUT_MS = 30_000;
 const TOKEN_WAIT_MS = 60_000;
+const EXIT_WAIT_MS = 5_000;
 
 export async function findBinary(name: string): Promise<string | null> {
   const dirs = [
@@ -66,6 +67,9 @@ export class LoginSession {
   private output = "";
   private finished = false;
   private watching = false;
+  private exited: Promise<void> = Promise.resolve();
+  /** Settles once the CLI has stopped and its folder is removed (or removal was given up). */
+  closed: Promise<void> = Promise.resolve();
 
   constructor(
     provider: string,
@@ -75,6 +79,7 @@ export class LoginSession {
     private readonly onChange: () => void,
     private readonly onToken: (tokenFile: string, home: string) => Promise<string>,
     targetAccount: string | null = null,
+    private readonly warn: (message: string) => void = () => {},
   ) {
     this.state = {
       id: path.basename(home),
@@ -100,6 +105,10 @@ export class LoginSession {
       detached: true,
     });
     this.child = child;
+    this.exited = new Promise((resolve) => {
+      child.once("exit", () => resolve());
+      child.once("error", () => resolve());
+    });
     const onData = (chunk: Buffer) => this.consume(chunk.toString("utf8"));
     child.stdout?.on("data", onData);
     child.stderr?.on("data", onData);
@@ -128,7 +137,7 @@ export class LoginSession {
     this.child?.stdin?.write(`${trimmed}\r`);
     this.state.status = "verifying";
     this.onChange();
-    void this.waitForToken(TOKEN_WAIT_MS);
+    this.watchForToken(TOKEN_WAIT_MS);
   }
 
   cancel(): void {
@@ -161,7 +170,7 @@ export class LoginSession {
         this.state.status = "waiting";
         this.onChange();
         // Polling CLIs write the file while still running; watch for it.
-        if (!this.spec.needsCode) void this.waitForToken(this.spec.windowMs);
+        if (!this.spec.needsCode) this.watchForToken(this.spec.windowMs);
       }
     }
     if (/authentication (?:failed|timed out)|invalid_grant|malformed auth code/i.test(this.output)) {
@@ -174,6 +183,13 @@ export class LoginSession {
           : "The sign-in link expired. Click Try again for a new one.",
       );
     }
+  }
+
+  private watchForToken(timeoutMs: number): void {
+    this.waitForToken(timeoutMs).catch((error: unknown) => {
+      this.warn(`Sign-in watch failed: ${(error as Error).message}`);
+      this.fail("Sign-in failed. Try again.");
+    });
   }
 
   private async waitForToken(timeoutMs: number): Promise<void> {
@@ -222,15 +238,42 @@ export class LoginSession {
 
   private finish(): void {
     this.finished = true;
+    this.closed = this.cleanUp().catch((error: unknown) => {
+      this.warn(`Could not remove sign-in folder ${this.home}: ${(error as Error).message}`);
+    });
+    this.onChange();
+  }
+
+  // The CLI can keep writing into its folder after SIGTERM, so wait for it to
+  // stop (SIGKILL if it won't) before removing the folder.
+  private async cleanUp(): Promise<void> {
     const pid = this.child?.pid;
-    if (pid) {
-      try {
-        process.kill(-pid, "SIGTERM");
-      } catch {
-        // already gone
+    if (pid && this.child?.exitCode === null && this.child.signalCode === null) {
+      signalGroup(pid, "SIGTERM");
+      let timer: NodeJS.Timeout | undefined;
+      const timedOut = await Promise.race([
+        this.exited.then(() => false),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(true), EXIT_WAIT_MS);
+          timer.unref();
+        }),
+      ]);
+      clearTimeout(timer);
+      if (timedOut) {
+        signalGroup(pid, "SIGKILL");
+        await this.exited;
       }
     }
-    void fs.rm(this.home, { recursive: true, force: true });
-    this.onChange();
+    // Children outside script's own lifetime may still be in the group.
+    if (pid) signalGroup(pid, "SIGKILL");
+    await fs.rm(this.home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+}
+
+function signalGroup(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    // already gone
   }
 }
