@@ -1,6 +1,6 @@
 ---
 name: subscription-accounts
-description: "Manage stacked AI subscription logins (Antigravity, Cursor, Grok, plus Claude/Codex through the Account Pooler) that bb switches between when one runs out of quota. Use when adding, switching or checking these accounts, or when a thread fails with a quota or usage-limit error."
+description: "Manage saved AI subscription logins for Antigravity, Cursor, Grok, Claude, and Codex. Use when adding, switching or checking these accounts, or when a thread fails with a quota or usage-limit error."
 ---
 
 # Subscription accounts
@@ -10,6 +10,7 @@ scripts, use `bb subs`:
 
 ```sh
 bb subs list [<provider>] [--json]
+bb subs quota [<provider>] [--refresh] [--json]
 bb subs add <antigravity|cursor|grok> [<name>] [--from <login-file>] [--force]
 bb subs use <provider> <name>
 bb subs next <provider>
@@ -22,16 +23,20 @@ bb subs remove <provider> <name>
   to the next account, stops the thread (so a fresh CLI reads the new login)
   and retries the turn. If every account is out, the retry is queued for the
   earliest reset.
-- Claude and Codex are handled by bb's Account Pooler (`bb pool ...`). The
-page adds, orders and turns on or off those accounts through it.
+- Claude and Codex use saved CLI login copies. The plugin switches those files directly. The Account Pooler stays off.
 
 The page also shows each account's subscription usage, remaining allowance,
 reset times and credits when reported by the provider. Usage refreshes every
 five minutes; each account has a manual Refresh action. Local Claude/Codex
 logins show usage before import. Missing metrics are unavailable, not zero.
 A switching cooldown is separate from measured quota. Failed requests keep
-dated last-known readings. Local Claude/Codex token expiry needs the CLI to
-refresh its login or a pooler-managed account.
+dated last-known readings. Use `bb subs quota --json` to inspect current plan,
+group, and model limits. Use `--refresh` for a new reading. See
+`../subscription-quota/SKILL.md` for unknown data and shared-limit interpretation.
+The page's **Log in again** action renews the selected Antigravity, Cursor, or
+Grok login and refreshes usage. Sign in with the same account. Its saved name,
+order, and active selection remain intact. Claude and Codex require their CLI
+login, then **Save it**.
 
 Usage trends show daily tokens, Today/Yesterday/30-day totals and model shares.
 Claude, Codex and Grok trends use local CLI logs and include all logins on the

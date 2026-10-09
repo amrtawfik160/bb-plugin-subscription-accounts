@@ -12,6 +12,12 @@ export const usageMetricSchema = z.object({
   unit: z.enum(["percent", "usd", "requests", "credits"]),
   resetAt: z.number().finite().nullable(),
   windowMs: z.number().finite().positive().optional(),
+  scope: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("model"), model: z.string() }),
+    z.object({ kind: z.literal("group"), group: z.string() }),
+    z.object({ kind: z.literal("feature"), feature: z.string() }),
+  ]).optional(),
+  derivedFromModels: z.boolean().optional(),
 });
 
 export const usageSchema = z.object({
@@ -21,6 +27,8 @@ export const usageSchema = z.object({
   fetchedAt: z.number().nullable(),
   refreshing: z.boolean(),
   error: z.string().nullable(),
+  attemptedAt: z.number().optional(),
+  modelQuotas: z.array(usageMetricSchema).optional(),
   history: historySchema.optional(),
 });
 
@@ -35,9 +43,15 @@ export function emptyUsage(): AccountUsage {
   };
 }
 
+interface UsageEntry {
+  value: AccountUsage;
+  attemptedAt: number;
+  pending?: Promise<void>;
+}
+
 /** Cache only normalized metrics; credential material never enters the view. */
 export class UsageCache {
-  private entries = new Map<string, { value: AccountUsage; attemptedAt: number; pending?: Promise<void> }>();
+  private entries = new Map<string, UsageEntry>();
   private disposed = false;
 
   constructor(
@@ -54,10 +68,9 @@ export class UsageCache {
     const previous = this.entries.get(key);
     if (previous?.pending) return previous.pending;
     if (!force && previous && this.now() - previous.attemptedAt < USAGE_TTL_MS) return Promise.resolve();
-    const entry = {
-      value: { ...(previous?.value ?? emptyUsage()), refreshing: true },
+    const entry: UsageEntry = {
+      value: { ...(previous?.value ?? emptyUsage()), refreshing: true, attemptedAt: this.now() },
       attemptedAt: this.now(),
-      pending: undefined as Promise<void> | undefined,
     };
     this.entries.set(key, entry);
     entry.pending = Promise.resolve()
@@ -73,8 +86,9 @@ export class UsageCache {
                     : data.history,
               }
             : {}),
-          status: data.metrics.length ? "ready" : "unavailable",
+          status: data.metrics.length || data.modelQuotas?.length ? "ready" : "unavailable",
           fetchedAt: this.now(),
+          attemptedAt: entry.attemptedAt,
           refreshing: false,
           error: null,
         });
@@ -171,7 +185,7 @@ export function mapAntigravity(summary: unknown, models: unknown = null): UsageM
         .find((b) => b.bucketId === id && number(b.remainingFraction) !== null);
       if (!bucket) return [];
       const fraction = Math.max(0, Math.min(1, number(bucket.remainingFraction)!));
-      return [metric(label, (1 - fraction) * 100, 100, "percent", timestamp(bucket.resetTime))!];
+      return [{ ...metric(label, (1 - fraction) * 100, 100, "percent", timestamp(bucket.resetTime))!, scope: { kind: "group", group: id.startsWith("gemini") ? "Gemini" : "Claude" } }];
     });
   }
   const pools = new Map<string, UsageMetric>();
@@ -191,7 +205,18 @@ export function mapAntigravity(summary: unknown, models: unknown = null): UsageM
     )!;
     if (!pools.has(pool) || row.used! > pools.get(pool)!.used!) pools.set(pool, row);
   }
-  return [...pools.values()];
+  return [...pools.values()].map((row) => ({ ...row, derivedFromModels: true }));
+}
+
+export function mapAntigravityModelQuotas(value: unknown): UsageMetric[] {
+  return Object.entries(object(object(value).models)).flatMap(([id, raw]) => {
+    const model = object(raw);
+    const quota = object(model.quotaInfo);
+    const fraction = number(quota.remainingFraction);
+    if (model.isInternal === true || fraction === null) return [];
+    const row = metric(textValue(model.displayName ?? model.label) ?? id, null, 100, "percent", timestamp(quota.resetTime), Math.max(0, Math.min(1, fraction)) * 100)!;
+    return [{ ...row, scope: { kind: "model", model: id } }];
+  });
 }
 
 export function mapCursor(
@@ -250,8 +275,10 @@ export function mapCursor(
   for (const [key, label] of [
     ["autoPercentUsed", "Cursor models"],
     ["apiPercentUsed", "Other models"],
-  ])
-    add(metric(label, number(plan[key] ?? restPlan[key]), 100, "percent", resetAt));
+  ]) {
+    const row = metric(label, number(plan[key] ?? restPlan[key]), 100, "percent", resetAt);
+    if (row) add({ ...row, scope: { kind: "group", group: label } });
+  }
   const spend = object(root.spendLimitUsage);
   const spendLimit = number(spend.individualLimit ?? spend.pooledLimit);
   const spendRemaining = number(spend.individualRemaining ?? spend.pooledRemaining);
@@ -290,7 +317,7 @@ export function mapGrok(value: unknown): UsageMetric[] {
     end = timestamp(period.end);
   if (!textValue(period.type) || start === null || end === null || end <= start)
     throw new UsageError("Grok returned an unrecognized billing response. Refresh to try again.");
-  const percent = config.creditUsagePercent === undefined ? 0 : number(config.creditUsagePercent);
+  const percent = number(config.creditUsagePercent);
   if (percent === null)
     throw new UsageError("Grok returned an invalid usage percentage. Refresh to try again.");
   const rows: UsageMetric[] = [];
@@ -321,7 +348,7 @@ export function mapClaude(value: unknown): UsageData {
     const label = labels[key] ?? `${model.charAt(0).toUpperCase()}${model.slice(1)} · weekly`;
     const window = object(root[key]);
     const row = metric(label, number(window.utilization), 100, "percent", timestamp(window.resets_at));
-    if (row) metrics.push({ ...row, windowMs: (key === "five_hour" ? 5 : 168) * 3_600_000 });
+    if (row) metrics.push({ ...row, windowMs: (key === "five_hour" ? 5 : 168) * 3_600_000, ...(key.startsWith("seven_day_") ? { scope: { kind: "group", group: model } satisfies NonNullable<UsageMetric["scope"]> } : {}) });
   }
   const extra = object(root.extra_usage);
   if (extra.is_enabled === true) {
@@ -398,7 +425,7 @@ export function mapCodex(
     const name = textValue(item.limit_name ?? item.metered_feature);
     if (!name) continue;
     metrics.push(
-      ...windows(extraRate, [`${name} · session`, `${name} · weekly`]),
+      ...windows(extraRate, [`${name} · session`, `${name} · weekly`]).map((row) => ({ ...row, scope: { kind: "feature", feature: name } satisfies NonNullable<UsageMetric["scope"]> })),
     );
   }
   const credits = object(root.credits);

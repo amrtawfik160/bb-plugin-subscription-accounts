@@ -80,11 +80,48 @@ describe("provider quota normalization", () => {
     );
     expect(result.metrics).toMatchObject([
       { label: "Plan usage", used: 24, limit: 20, remaining: 0, unit: "usd" },
-      { label: "Cursor models", used: 0 },
+      { label: "Cursor models", used: 0, limit: 100, remaining: 100, unit: "percent", scope: { kind: "group", group: "Cursor models" } },
       { label: "On-demand", used: 5, limit: 50 },
       { label: "Credit balance", used: null, limit: null, remaining: 8 },
     ]);
     expect(mapCursor({ planUsage: { limit: 2000 } }).metrics).toEqual([]);
+  });
+
+  it("reports Cursor model-group remaining from pool percentages and omits missing pools", () => {
+    const result = mapCursor({
+      planUsage: { autoPercentUsed: 40, apiPercentUsed: 25 },
+    });
+    expect(result.metrics).toEqual([
+      {
+        label: "Cursor models",
+        used: 40,
+        limit: 100,
+        remaining: 60,
+        unit: "percent",
+        resetAt: null,
+        scope: { kind: "group", group: "Cursor models" },
+      },
+      {
+        label: "Other models",
+        used: 25,
+        limit: 100,
+        remaining: 75,
+        unit: "percent",
+        resetAt: null,
+        scope: { kind: "group", group: "Other models" },
+      },
+    ]);
+    expect(mapCursor({ planUsage: { autoPercentUsed: 10 } }).metrics).toEqual([
+      {
+        label: "Cursor models",
+        used: 10,
+        limit: 100,
+        remaining: 90,
+        unit: "percent",
+        resetAt: null,
+        scope: { kind: "group", group: "Cursor models" },
+      },
+    ]);
   });
 
   it("uses the included Enterprise requests and exact billing cycle", () => {
@@ -112,7 +149,7 @@ describe("provider quota normalization", () => {
     ]);
   });
 
-  it("accepts Grok proto-JSON zero but refuses malformed periods and monthly-as-weekly quotas", () => {
+  it("accepts reported Grok zero but keeps missing quota unknown and refuses malformed periods", () => {
     const config = {
       currentPeriod: {
         type: "USAGE_PERIOD_TYPE_WEEKLY",
@@ -120,11 +157,13 @@ describe("provider quota normalization", () => {
         end: "2026-09-08",
       },
     };
-    expect(mapGrok({ config })).toMatchObject([{ label: "Weekly pool", used: 0, remaining: 100 }]);
+    expect(mapGrok({ config: { ...config, creditUsagePercent: 0 } })).toMatchObject([{ label: "Weekly pool", used: 0, remaining: 100 }]);
+    expect(() => mapGrok({ config })).toThrow(UsageError);
     expect(
       mapGrok({
         config: {
           ...config,
+          creditUsagePercent: 0,
           currentPeriod: {
             ...config.currentPeriod,
             type: "USAGE_PERIOD_TYPE_MONTHLY",

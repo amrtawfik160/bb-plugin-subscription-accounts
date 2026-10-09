@@ -69,6 +69,71 @@ const ready: AccountUsage = {
 };
 
 describe("subscription usage page", () => {
+  it("offers account-specific re-login instead of duplicate expired-login errors", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const loginStart = vi.fn(async () => ({
+      id: "relogin", provider: "antigravity", targetAccount: "test-account",
+      status: "waiting", url: "https://accounts.google.com/test", userCode: null,
+      needsCode: true, expiresAt: now + 58_000, error: null, account: null,
+    }));
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, {
+      rpc: {
+        overview: () => fixture({ ...emptyUsage(), status: "error", error: "Antigravity login expired. Refresh the CLI login or configure its OAuth client in plugin settings." }),
+        loginStart,
+      },
+    });
+    const action = await slot.findByRole("button", { name: "Log in again for test-account" });
+    expect(slot.getByText("Login expired. Log in again to load usage.")).toBeTruthy();
+    expect(slot.queryByText(/Usage could not be loaded/)).toBeNull();
+    expect(slot.queryByText(/configure its OAuth client/)).toBeNull();
+    fireEvent.click(action);
+    await waitFor(() => expect(loginStart).toHaveBeenCalledWith({ provider: "antigravity", name: "test-account" }));
+    expect(await slot.findByText("Log in again for test-account")).toBeTruthy();
+    expect(slot.getByText(/Open the sign-in page/).textContent).toContain("test@example.com");
+    slot.lifecycle.unmount();
+  });
+
+  it("shows concise login-expired copy on the All quotas tab", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, {
+      rpc: {
+        overview: () => fixture({
+          ...emptyUsage(),
+          status: "error",
+          error: "Antigravity login expired. Refresh the CLI login or configure its OAuth client in plugin settings.",
+        }),
+      },
+    });
+    fireEvent.click(await slot.findByRole("tab", { name: "All" }));
+    const quotas = within(slot.getByRole("region", { name: "Antigravity quotas" }));
+    expect(quotas.getByText("Login expired. Log in again to load usage.")).toBeTruthy();
+    expect(quotas.queryByText(/configure its OAuth client/)).toBeNull();
+    expect(quotas.queryByText(/Antigravity login expired/)).toBeNull();
+    slot.lifecycle.unmount();
+  });
+
+  it("shows sign-in start failures inline and reports cancellation after retry", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const loginStart = vi.fn().mockRejectedValueOnce(new Error("The CLI is not installed.")).mockResolvedValueOnce({
+      id: "retry", provider: "antigravity", targetAccount: "test-account", status: "waiting",
+      url: "https://accounts.google.com/test", userCode: null, needsCode: true,
+      expiresAt: now + 58_000, error: null, account: null,
+    });
+    const loginCancel = vi.fn(async () => ({ kept: true }));
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, {
+      rpc: { overview: () => fixture(ready), loginStart, loginCancel },
+    });
+    fireEvent.click(await slot.findByRole("button", { name: "Log in again for test-account" }));
+    expect((await slot.findByRole("alert")).textContent).toBe("The CLI is not installed.");
+    fireEvent.click(slot.getByRole("button", { name: "Try again" }));
+    await slot.findByRole("link", { name: "Open sign-in page" });
+    fireEvent.click(slot.getByRole("button", { name: "Cancel" }));
+    expect(await slot.findByText("Sign-in cancelled. Your saved accounts were kept.")).toBeTruthy();
+    expect(loginCancel).toHaveBeenCalledTimes(1);
+    expect(slot.getByRole("button", { name: "Log in again for test-account" })).toBeTruthy();
+    slot.lifecycle.unmount();
+  });
+
   it.each(["codex", "claude"] as const)("switches the %s machine account independently of account routing", async (provider) => {
     const app = await loadPluginApp(() => import("./app"));
     const view = fixture(ready);
@@ -636,6 +701,145 @@ describe("subscription usage page", () => {
     await unavailable.findByText(/The provider did not report usage/);
     expect(unavailable.queryByText("0% used")).toBeNull();
     unavailable.lifecycle.unmount();
+  });
+
+  it("renders model quota rows when plan metrics are empty and ready", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const modelOnly: AccountUsage = {
+      ...emptyUsage(),
+      status: "ready",
+      plan: "Pro",
+      fetchedAt: now,
+      metrics: [],
+      modelQuotas: [
+        {
+          label: "Gemini Pro",
+          used: null,
+          remaining: 25,
+          limit: 100,
+          unit: "percent",
+          resetAt: now + 3_600_000,
+          scope: { kind: "model", model: "pro" },
+        },
+      ],
+    };
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, { rpc: { overview: () => fixture(modelOnly) } });
+    expect(await slot.findByText("Gemini Pro")).toBeTruthy();
+    expect(slot.getByText("25% left")).toBeTruthy();
+    expect(slot.queryByText(/Usage could not be loaded/)).toBeNull();
+    fireEvent.click(slot.getByRole("tab", { name: "All" }));
+    const quotas = within(slot.getByRole("region", { name: "Antigravity quotas" }));
+    expect(quotas.getByText("Gemini Pro")).toBeTruthy();
+    expect(quotas.getByText("25% left")).toBeTruthy();
+    expect(quotas.queryByText(/Quota unavailable/)).toBeNull();
+    slot.lifecycle.unmount();
+  });
+
+  it("omits derived plan rows when provider-reported model quotas are shown", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const mixed: AccountUsage = {
+      ...emptyUsage(),
+      status: "ready",
+      plan: "Pro",
+      fetchedAt: now,
+      metrics: [
+        {
+          label: "Gemini · 5 hours",
+          used: 40,
+          remaining: 60,
+          limit: 100,
+          unit: "percent",
+          resetAt: now + 3_600_000,
+          derivedFromModels: true,
+        },
+        {
+          label: "Gemini · weekly",
+          used: 10,
+          remaining: 90,
+          limit: 100,
+          unit: "percent",
+          resetAt: now + 86_400_000,
+        },
+      ],
+      modelQuotas: [
+        {
+          label: "Gemini Pro",
+          used: null,
+          remaining: 25,
+          limit: 100,
+          unit: "percent",
+          resetAt: now + 3_600_000,
+          scope: { kind: "model", model: "pro" },
+        },
+      ],
+    };
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, { rpc: { overview: () => fixture(mixed) } });
+    expect(await slot.findByText("Gemini Pro")).toBeTruthy();
+    expect(slot.getByText("25% left")).toBeTruthy();
+    expect(slot.getByText("Gemini · weekly")).toBeTruthy();
+    expect(slot.queryByText("Gemini · 5 hours")).toBeNull();
+    fireEvent.click(slot.getByRole("tab", { name: "All" }));
+    const quotas = within(slot.getByRole("region", { name: "Antigravity quotas" }));
+    expect(quotas.getByText("Gemini Pro")).toBeTruthy();
+    expect(quotas.getByText("Gemini · weekly")).toBeTruthy();
+    expect(quotas.queryByText("Gemini · 5 hours")).toBeNull();
+    slot.lifecycle.unmount();
+  });
+
+  it("keeps Cancel available while verifying a re-login", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const loginCancel = vi.fn(async () => ({ kept: true }));
+    const loginStart = vi.fn(async () => ({
+      id: "verify-session",
+      provider: "antigravity",
+      targetAccount: "test-account",
+      status: "verifying",
+      url: "https://accounts.google.com/test",
+      userCode: null,
+      needsCode: true,
+      expiresAt: now + 58_000,
+      error: null,
+      account: null,
+    }));
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, {
+      rpc: { overview: () => fixture(ready), loginStart, loginCancel },
+    });
+    fireEvent.click(await slot.findByRole("button", { name: "Log in again for test-account" }));
+    expect(await slot.findByText(/Saving the login|Signing in/)).toBeTruthy();
+    const cancel = slot.getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
+    expect(cancel.disabled).toBe(false);
+    fireEvent.click(cancel);
+    expect(await slot.findByText("Sign-in cancelled. Your saved accounts were kept.")).toBeTruthy();
+    expect(loginCancel).toHaveBeenCalledTimes(1);
+    expect(slot.getByRole("button", { name: "Log in again for test-account" })).toBeTruthy();
+    slot.lifecycle.unmount();
+  });
+
+  it("does not claim accounts were kept when cancel arrives after credentials committed", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const loginCancel = vi.fn(async () => ({ kept: false }));
+    const loginStart = vi.fn(async () => ({
+      id: "committed-session",
+      provider: "antigravity",
+      targetAccount: "test-account",
+      status: "verifying",
+      url: "https://accounts.google.com/test",
+      userCode: null,
+      needsCode: true,
+      expiresAt: now + 58_000,
+      error: null,
+      account: null,
+    }));
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, {
+      rpc: { overview: () => fixture(ready), loginStart, loginCancel },
+    });
+    fireEvent.click(await slot.findByRole("button", { name: "Log in again for test-account" }));
+    expect(await slot.findByText(/Saving the login|Signing in/)).toBeTruthy();
+    fireEvent.click(slot.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(loginCancel).toHaveBeenCalledTimes(1));
+    expect(slot.queryByText("Sign-in cancelled. Your saved accounts were kept.")).toBeNull();
+    expect(slot.getByRole("button", { name: "Log in again for test-account" })).toBeTruthy();
+    slot.lifecycle.unmount();
   });
 
   it("shows local Codex usage while the pooler is disabled", async () => {

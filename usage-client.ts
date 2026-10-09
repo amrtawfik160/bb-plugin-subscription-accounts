@@ -6,6 +6,7 @@ import type { ModelPricing } from "./pricing.js";
 import { emptyHistory } from "./history.js";
 import {
   mapAntigravity,
+  mapAntigravityModelQuotas,
   mapClaude,
   mapCodex,
   mapCursor,
@@ -461,12 +462,13 @@ export function createUsageClient(
       }
       const hasSummary = Array.isArray(summary?.groups) || Array.isArray(object(summary?.response).groups);
       const [models, plan] = await Promise.all([
-        hasSummary ? Promise.resolve(null) : cloud("fetchAvailableModels"),
+        hasSummary ? optional(cloud("fetchAvailableModels")) : cloud("fetchAvailableModels"),
         optional(cloud("loadCodeAssist")),
       ]);
       return {
         plan: textValue(object(plan?.paidTier).name ?? object(plan?.currentTier).name),
         metrics: mapAntigravity(summary, models),
+        modelQuotas: mapAntigravityModelQuotas(models),
       };
     }
 
