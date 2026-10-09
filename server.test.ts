@@ -228,6 +228,69 @@ sleep 5
     expect(await fs.readFile(file, "utf8")).toBe(savedLogin);
   });
 
+  it.each([
+    ["claude", "success"], ["codex", "success"],
+    ["claude", "cancel"], ["codex", "cancel"],
+    ["claude", "missing identity"], ["codex", "missing identity"],
+  ] as const)("adds a %s account without changing existing accounts or machine login (%s)", async (provider, outcome) => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({})));
+    const { harness } = await setup();
+    const credentials = (id: string | null, token: string, email: string) => JSON.stringify(provider === "claude"
+      ? { claudeAiOauth: { accessToken: token, refreshToken: `${token}-refresh`, expiresAt: Date.now() + 3600000 } }
+      : { tokens: { account_id: id, access_token: token, refresh_token: `${token}-refresh`,
+        id_token: `h.${Buffer.from(JSON.stringify({ email })).toString("base64url")}.s` } });
+    const oldEmail = provider === "codex" ? "same@example.com" : "existing@example.com";
+    const newEmail = provider === "codex" ? oldEmail : "new@example.com";
+    const old = credentials("existing-org", "old-access", oldEmail);
+    const fresh = credentials(outcome === "missing identity" ? null : "new-org", "fresh-access", newEmail);
+    const relativeFile = provider === "claude" ? ".claude/.credentials.json" : ".codex/auth.json";
+    const file = path.join(home!, relativeFile);
+    await fs.mkdir(path.dirname(file));
+    await fs.writeFile(file, old);
+    const profileFile = path.join(home!, ".claude.json");
+    const oldProfile = JSON.stringify({ theme: "dark", oauthAccount: { accountUuid: "existing-org", emailAddress: oldEmail } });
+    if (provider === "claude") await fs.writeFile(profileFile, oldProfile);
+    const saved = rpcContract.saveCurrent.output.parse(await harness.behavior.callRpc("saveCurrent", { provider }));
+    const bin = path.join(home!, "fake-bin");
+    await fs.mkdir(bin);
+    const profile = JSON.stringify({ oauthAccount: { accountUuid: outcome === "missing identity" ? null : "new-org", emailAddress: newEmail } });
+    await fs.writeFile(path.join(bin, provider), `#!/bin/sh
+printf '%s\\n' '${provider === "claude" ? "https://claude.ai/oauth/authorize?fixture=add" : "https://auth.openai.com/codex/device"}' 'ABCD-1234'
+${provider === "claude" ? "read code" : `sleep ${outcome === "cancel" ? 5 : 0.2}`}
+mkdir -p "$HOME/${path.dirname(relativeFile)}"
+printf '%s' '${fresh}' > "$HOME/${relativeFile}"
+${provider === "claude" ? `printf '%s' '${profile}' > "$CLAUDE_CONFIG_DIR/.claude.json"` : ""}
+sleep 5
+`, { mode: 0o700 });
+    vi.stubEnv("PATH", `${bin}:/usr/bin:/bin`);
+    await harness.behavior.callRpc("loginStart", { provider });
+    await vi.waitFor(async () => {
+      const view = rpcContract.overview.output.parse(await harness.behavior.callRpc("overview", null));
+      expect(view.login).toMatchObject({ status: "waiting", targetAccount: null });
+    });
+    if (outcome === "cancel") {
+      expect(await harness.behavior.callRpc("loginCancel", null)).toEqual({ kept: true });
+    } else {
+      if (provider === "claude") await harness.behavior.callRpc("loginSubmit", { code: "fixture#state" });
+      await vi.waitFor(async () => {
+        const view = rpcContract.overview.output.parse(await harness.behavior.callRpc("overview", null));
+        expect(view.login?.status).toBe(outcome === "success" ? "done" : "failed");
+      }, { timeout: 8000 });
+    }
+    const view = rpcContract.overview.output.parse(await harness.behavior.callRpc("overview", null));
+    const section = view.swap.find((s) => s.id === provider)!;
+    expect(section.active).toBe(saved.name);
+    expect(section.accounts.map((a) => a.name)).toEqual(outcome === "success" ? [saved.name, provider === "codex" ? "same-2" : "new"] : [saved.name]);
+    expect(await fs.readFile(file, "utf8")).toBe(old);
+    if (provider === "claude") expect(await fs.readFile(profileFile, "utf8")).toBe(oldProfile);
+    if (outcome === "success") {
+      await harness.behavior.callRpc("use", { provider, name: section.accounts[1].name });
+      expect(await fs.readFile(file, "utf8")).toBe(fresh);
+    } else if (outcome === "missing identity") {
+      expect(view.login?.error).toBe("Sign-in did not save a verified account identity. Try again.");
+    }
+  });
+
   it("keeps saved and live credentials when cancel wins during a delayed credential save", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => Response.json(billing)));
     const { file, harness } = await setup();
@@ -815,7 +878,8 @@ describe("Claude and Codex direct switching", () => {
     });
     expect(codexEnv.map((entry) => entry.name)).toEqual(["CODEX_OPENAI_BASE_URL", "CODEX_POOL_AUTH_TOKEN"]);
     await expect(created.harness.behavior.callRpc("poolEnable", null)).rejects.toThrow(/Account Pooler/);
-    await expect(created.harness.behavior.callRpc("loginStart", { provider: "claude" })).rejects.toThrow(/CLI/);
+    vi.stubEnv("PATH", path.join(home, "missing-bin"));
+    await expect(created.harness.behavior.callRpc("loginStart", { provider: "claude" })).rejects.toThrow(/not installed/);
     const reloaded = await created.harness.lifecycle.reload(plugin);
     dispose = () => reloaded.harness.lifecycle.dispose();
     const again = await reloaded.harness.behavior.callRpc("overview", null) as typeof overview;

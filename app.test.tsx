@@ -93,6 +93,20 @@ describe("subscription usage page", () => {
     slot.lifecycle.unmount();
   });
 
+  it.each(["claude", "codex"] as const)("provides setup guidance when the %s CLI is missing", async (provider) => {
+    const app = await loadPluginApp(() => import("./app"));
+    const data = fixture(ready);
+    const label = provider === "claude" ? "Claude" : "Codex";
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, {
+      rpc: { overview: () => ({ ...data, swap: [{ ...data.swap[0], id: provider, label, installed: false, accounts: [] }] }) },
+    });
+    fireEvent.click(await slot.findByRole("tab", { name: new RegExp(label) }));
+    expect(slot.getByRole("link", { name: `Set up ${label} CLI` })).toBeTruthy();
+    expect(slot.getByText(new RegExp(`Install the ${label} CLI on the bb server`))).toBeTruthy();
+    expect(slot.queryByRole("button", { name: `Add ${label} account` })).toBeNull();
+    slot.lifecycle.unmount();
+  });
+
   it.each(["claude", "codex"] as const)("offers isolated recovery for an expired saved %s CLI login", async (provider) => {
     const app = await loadPluginApp(() => import("./app"));
     const data = fixture({ ...ready, status: "error", error: "The CLI session expired or its refresh token was replaced. Sign in again." });

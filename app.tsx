@@ -536,6 +536,22 @@ function SignIn({
     if (code.trim()) void run(() => rpc.call("loginSubmit", { code }));
   };
 
+  if (disabled && !open && (provider === "claude" || provider === "codex")) {
+    return (
+      <p role="status" className="text-sm text-muted-foreground">
+        Install the {label} CLI on the bb server, then refresh this page. {" "}
+        <a
+          href={provider === "claude" ? "https://code.claude.com/docs/en/setup" : "https://developers.openai.com/codex/cli"}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex min-h-11 items-center underline focus-visible:outline-2 focus-visible:outline-ring"
+        >
+          Set up {label} CLI
+        </a>
+      </p>
+    );
+  }
+
   if (!open || status === "done") {
     return (
       <div className="flex flex-wrap items-center gap-2">
@@ -804,18 +820,14 @@ function SwapTab({ section, data, rpc, run }: { section: SwapSection; data: Over
         </AccountList>
       </section>
 
-      {section.id === "claude" || section.id === "codex" ? (
-        <p className="text-sm text-muted-foreground">Sign in with the CLI, then choose Save it.</p>
-      ) : (
-        <SignIn
-          provider={section.id}
-          label={section.label}
-          login={data.login}
-          rpc={rpc}
-          run={run}
-          disabled={!section.installed}
-        />
-      )}
+      <SignIn
+        provider={section.id}
+        label={section.label}
+        login={data.login}
+        rpc={rpc}
+        run={run}
+        disabled={!section.installed}
+      />
     </div>
   );
 }
