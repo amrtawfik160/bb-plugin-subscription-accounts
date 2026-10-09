@@ -296,6 +296,10 @@ function isHistoricalUsage(usage: AccountUsage, now: number): boolean {
   return usage.status !== "ready" || usage.fetchedAt === null || now - usage.fetchedAt >= USAGE_TTL_MS;
 }
 
+function isLoginExpired(usage: AccountUsage): boolean {
+  return Boolean(usage.error && /sign in again|login expired|session expired|access expired/i.test(usage.error));
+}
+
 function QuotaMeter({ row, now, historical = false }: { row: UsageMetric; now: number; historical?: boolean }) {
   const percent = row.used !== null && row.limit !== null ? (row.used / row.limit) * 100 : null;
   const resetPassed = row.resetAt !== null && row.resetAt <= now;
@@ -394,7 +398,7 @@ function UsageDetails({
     }
   };
   const stale = isHistoricalUsage(usage, now);
-  const loginExpired = Boolean(actions && usage.error && /sign in again|login expired|session expired|access expired/i.test(usage.error));
+  const loginExpired = Boolean(actions && isLoginExpired(usage));
   const quotaRows = [...usage.metrics.filter((row) => !row.derivedFromModels), ...(usage.modelQuotas ?? [])];
   return (
     <div className="space-y-3 pt-2">
@@ -696,6 +700,7 @@ function SwapTab({ section, data, rpc, run }: { section: SwapSection; data: Over
         <AccountList empty={`No ${section.label} accounts yet. Add one below.`}>
           {section.accounts.map((account, index) => {
             const out = account.exhaustedUntil > now;
+            const loginExpired = isLoginExpired(account.usage);
             return (
               <li key={account.name} className="space-y-2 py-4">
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
@@ -725,19 +730,20 @@ function SwapTab({ section, data, rpc, run }: { section: SwapSection; data: Over
                     <span
                       className={cn(
                         "inline-flex items-center gap-1.5 text-xs",
-                        out
+                        out || loginExpired
                           ? "text-destructive"
                           : account.active
                             ? "text-foreground"
                             : "text-muted-foreground",
                       )}
                     >
-                      <Dot tone={out ? "bad" : account.active ? "good" : "idle"} />
-                      {account.active ? (out ? "In use · out of quota" : "In use") : null}
-                      {!account.active && out
+                      <Dot tone={out || loginExpired ? "bad" : account.active ? "good" : "idle"} />
+                      {loginExpired ? (account.active ? "In use · login expired" : "Login expired") : null}
+                      {account.active && !loginExpired ? (out ? "In use · out of quota" : "In use") : null}
+                      {!account.active && out && !loginExpired
                         ? `Out of quota · back in ${formatWait(account.exhaustedUntil - now)}`
                         : null}
-                      {!account.active && !out ? "Ready" : null}
+                      {!account.active && !out && !loginExpired ? "Ready" : null}
                     </span>
                   </div>
                   <div className="flex flex-wrap items-center gap-1.5">
@@ -1179,9 +1185,7 @@ function AllQuotas({ data, onOpenProvider }: { data: Overview; onOpenProvider: (
               <div className="space-y-4">
                 {usageRows.map(({ key, name, usage }) => {
                   const quotaRows = [...usage.metrics.filter((row) => !row.derivedFromModels), ...(usage.modelQuotas ?? [])];
-                  const loginExpired =
-                    Boolean(usage.error) &&
-                    /sign in again|login expired|session expired|access expired/i.test(usage.error!);
+                  const loginExpired = isLoginExpired(usage);
                   return (
                   <div key={key} className="space-y-2">
                     <p className="break-words text-xs text-muted-foreground">
@@ -1241,7 +1245,7 @@ function AllQuotas({ data, onOpenProvider }: { data: Overview; onOpenProvider: (
                     </div>
                     {local.usage.error ? (
                       <p className="break-words text-xs text-destructive">
-                        {/sign in again|login expired|session expired|access expired/i.test(local.usage.error)
+                        {isLoginExpired(local.usage)
                           ? "Login expired. Log in again to load usage."
                           : local.usage.error}{" "}
                         · Last known usage

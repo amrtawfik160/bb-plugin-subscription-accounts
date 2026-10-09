@@ -83,6 +83,8 @@ describe("subscription usage page", () => {
       rpc: { overview: () => ({ ...data, swap: [section] }), loginStart },
     });
     fireEvent.click(await slot.findByRole("tab", { name: new RegExp(section.label) }));
+    expect(slot.getByText("In use · login expired")).toBeTruthy();
+    expect(slot.queryByText("Ready")).toBeNull();
     fireEvent.click(await slot.findByRole("button", { name: "Log in again for test-account" }));
     await waitFor(() => expect(loginStart).toHaveBeenCalledWith({ provider, name: "test-account" }));
     expect(await slot.findByRole("link", { name: "Open sign-in page" })).toBeTruthy();
