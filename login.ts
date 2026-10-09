@@ -120,7 +120,10 @@ export class LoginSession {
     const onData = (chunk: Buffer) => this.consume(chunk.toString("utf8"));
     child.stdout?.on("data", onData);
     child.stderr?.on("data", onData);
-    child.on("error", (error) => this.fail(`Could not start ${this.spec.binary}: ${error.message}`));
+    child.on("error", (error) => {
+      this.warn(`Could not start ${this.spec.binary}: ${error.message}`);
+      this.fail(`Could not start the ${this.spec.binary} CLI on the bb server. Check that it is installed, then try again.`);
+    });
     child.on("exit", () => {
       if (this.finished || this.state.status !== "waiting") return;
       // Browser-poll CLIs exit once the browser step is done; give the file a moment.
@@ -133,7 +136,8 @@ export class LoginSession {
       this.fail("The sign-in link expired. Click Try again for a new one.");
     });
     setTimeout(() => {
-      if (this.state.status === "starting") this.fail(`${this.spec.binary} did not print a sign-in link.`);
+      if (this.state.status === "starting")
+        this.fail(`The ${this.spec.binary} CLI did not start a sign-in. Update it on the bb server, then try again.`);
     }, URL_TIMEOUT_MS).unref();
   }
 
@@ -179,6 +183,11 @@ export class LoginSession {
         this.onChange();
         // Polling CLIs write the file while still running; watch for it.
         if (!this.spec.needsCode) this.watchForToken(this.spec.windowMs);
+        // Paste-code CLIs can wait forever; end the attempt when the link stops working.
+        else
+          setTimeout(() => {
+            if (this.state.status === "waiting") this.fail("The sign-in link expired. Click Try again for a new one.");
+          }, this.spec.windowMs).unref();
       }
     }
     if (/authentication (?:failed|timed out)|invalid_grant|malformed auth code/i.test(this.output)) {

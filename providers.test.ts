@@ -84,3 +84,17 @@ describe("local Claude / Codex logins", () => {
     expect(readCodexLocal(JSON.stringify({ OPENAI_API_KEY: "k" }))).toBeNull();
   });
 });
+
+describe("Claude sign-in link", () => {
+  it("matches the links current and older Claude Code builds print", async () => {
+    const { CLI_LOGIN_SPECS } = await import("./providers");
+    const pattern = CLI_LOGIN_SPECS.claude.urlPattern;
+    for (const url of [
+      "https://claude.com/cai/oauth/authorize?code=true&client_id=x",
+      "https://claude.ai/oauth/authorize?code=true",
+      "https://platform.claude.com/oauth/authorize?code=true",
+    ]) {
+      expect(pattern.exec(`visit: ${url}\n`)?.[0]).toBe(url);
+    }
+  });
+});

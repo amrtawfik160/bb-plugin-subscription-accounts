@@ -164,9 +164,10 @@ function useOverview() {
       try {
         await task();
         if (done) toast.success(done);
-        refetch();
       } catch (cause) {
         toast.error(message(cause));
+      } finally {
+        refetch();
       }
     },
     [refetch],
@@ -489,6 +490,7 @@ function SignIn({
     | { kind: "cancelled" }
   >({ kind: "closed" });
   const [code, setCode] = useState("");
+  const [codeError, setCodeError] = useState<string | null>(null);
   const matches = login?.provider === provider && (login.targetAccount ?? null) === (account?.name ?? null);
   const busy = login && !["done", "failed"].includes(login.status);
   const mine = attempt.kind === "open"
@@ -499,29 +501,46 @@ function SignIn({
   const waiting = status === "waiting";
   const now = useNow(1_000, waiting);
   const left = mine?.expiresAt ? Math.max(0, mine.expiresAt - now) : 0;
+  // The server ends the attempt at expiry; show it right away instead of a frozen 0s.
+  const linkExpired = waiting && Boolean(mine?.expiresAt) && left === 0;
+  const elsewhere = Boolean(busy) && !matches;
 
   useEffect(() => {
     if (status === "done" && open) {
-      toast.success(account ? `Logged in again for ${account.name}` : `Added ${mine?.account ?? "account"}`);
+      toast.success(
+        account
+          ? `Logged in again for ${account.name}`
+          : provider === "claude" || provider === "codex"
+            ? `Added ${mine?.account ?? "account"}. Choose Use now to switch this machine to it.`
+            : `Added ${mine?.account ?? "account"}`,
+      );
       setAttempt({ kind: "closed" });
       setCode("");
     }
-  }, [status, open, mine?.account, account?.name]);
+  }, [status, open, mine?.account, account?.name, provider]);
 
   const start = () => {
     setAttempt({ kind: "starting" });
     setCode("");
+    setCodeError(null);
     void run(async () => {
       try {
         const next = await rpc.call("loginStart", account ? { provider, name: account.name } : { provider });
         setAttempt({ kind: "open", login: next });
       } catch (cause) {
         setAttempt({ kind: "failed", error: message(cause) });
-        throw cause;
       }
     });
   };
   const cancel = () => {
+    setCodeError(null);
+    // Closing a failed attempt is not a cancel: nothing was in progress.
+    if (status === "failed") {
+      setAttempt({ kind: "closed" });
+      setCode("");
+      if (mine) void rpc.call("loginCancel").catch(() => undefined);
+      return;
+    }
     void run(async () => {
       const result = mine ? await rpc.call("loginCancel") : { kept: true };
       setAttempt(result.kept ? { kind: "cancelled" } : { kind: "closed" });
@@ -530,7 +549,15 @@ function SignIn({
   };
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (code.trim()) void run(() => rpc.call("loginSubmit", { code }));
+    if (!code.trim()) return;
+    setCodeError(null);
+    void run(async () => {
+      try {
+        await rpc.call("loginSubmit", { code });
+      } catch (cause) {
+        setCodeError(message(cause));
+      }
+    });
   };
 
   if (disabled && !open && (provider === "claude" || provider === "codex")) {
@@ -565,6 +592,11 @@ function SignIn({
           {account ? "Log in again" : `Add ${label} account`}
         </Button>
         {attempt.kind === "cancelled" ? <p role="status" className="text-xs text-muted-foreground">Sign-in cancelled. Your saved accounts were kept.</p> : null}
+        {elsewhere && !disabled ? (
+          <p role="status" className="text-xs text-muted-foreground">
+            Another sign-in is in progress. Finish or cancel it first.
+          </p>
+        ) : null}
         {children}
       </div>
     );
@@ -592,7 +624,21 @@ function SignIn({
         </div>
       ) : null}
 
-      {mine && (waiting || status === "verifying") ? (
+      {linkExpired ? (
+        <div className="flex flex-wrap items-center gap-3">
+          <p role="alert" className="text-sm text-destructive">The sign-in link expired.</p>
+          <Button
+            size="sm"
+            className="min-h-11 sm:min-h-8"
+            // The server may not have closed the old attempt yet; close it before starting over.
+            onClick={() => void rpc.call("loginCancel").catch(() => undefined).then(start)}
+          >
+            Try again
+          </Button>
+        </div>
+      ) : null}
+
+      {mine && !linkExpired && (waiting || status === "verifying") ? (
         <ol className="space-y-4 text-sm">
           <li className="space-y-2">
             <p>
@@ -635,6 +681,9 @@ function SignIn({
                   {status === "verifying" ? "Signing in…" : account ? "Log in again" : "Add"}
                 </Button>
               </form>
+              {codeError ? (
+                <p role="alert" className="break-words text-sm text-destructive">{codeError}</p>
+              ) : null}
             </li>
           ) : (
             <li>
@@ -663,6 +712,12 @@ function SwapTab({ section, data, rpc, run }: { section: SwapSection; data: Over
   const target = (name: string) => ({ provider: section.id, name });
   const active = section.accounts.find((a) => a.active);
   const ready = section.accounts.filter((a) => a.exhaustedUntil <= now).length;
+  // One switch at a time: the buttons stay disabled until the list reloads.
+  const [pending, setPending] = useState<string | null>(null);
+  const act = (key: string, task: () => Promise<unknown>, done?: string) => {
+    setPending(key);
+    void Promise.resolve(run(task, done)).finally(() => setPending(null));
+  };
 
   return (
     <div className="space-y-5">
@@ -757,14 +812,20 @@ function SwapTab({ section, data, rpc, run }: { section: SwapSection; data: Over
                         : null}
                       {!account.active && !out && !loginExpired ? "Ready" : null}
                     </span>
+                    {out && account.lastError ? (
+                      <p className="line-clamp-2 break-words text-xs text-muted-foreground" title={account.lastError}>
+                        Reason: {account.lastError}
+                      </p>
+                    ) : null}
                   </div>
                   <div className="flex flex-wrap items-center gap-1.5">
                     {out ? (
                       <Button
                         size="sm"
                         variant="outline"
+                        disabled={pending !== null}
                         onClick={() =>
-                          run(() => rpc.call("reset", target(account.name)), `${account.name} marked ready`)
+                          act(`reset:${account.name}`, () => rpc.call("reset", target(account.name)), `${account.name} marked ready`)
                         }
                       >
                         <Icon name="RotateCcw" className="size-3.5" />
@@ -774,21 +835,25 @@ function SwapTab({ section, data, rpc, run }: { section: SwapSection; data: Over
                       <Button
                         size="sm"
                         variant="outline"
+                        disabled={pending !== null}
                         onClick={() =>
-                          run(() => rpc.call("markUsed", target(account.name)), "Moved to the next account")
+                          act(`skip:${account.name}`, () => rpc.call("markUsed", target(account.name)), "Moved to the next account")
                         }
                       >
-                        Skip to next
+                        {pending === `skip:${account.name}` ? "Switching…" : "Skip to next"}
                       </Button>
                     ) : null}
                     {!account.active ? (
                       <Button
                         size="sm"
+                        variant={loginExpired ? "outline" : "default"}
+                        disabled={pending !== null}
+                        aria-label={loginExpired ? `Use ${account.name} anyway. Its login looks expired; log in again first.` : undefined}
                         onClick={() =>
-                          run(() => rpc.call("use", target(account.name)), `Now using ${account.name}`)
+                          act(`use:${account.name}`, () => rpc.call("use", target(account.name)), `Now using ${account.name}`)
                         }
                       >
-                        Use now
+                        {pending === `use:${account.name}` ? "Switching…" : loginExpired ? "Use anyway" : "Use now"}
                       </Button>
                     ) : null}
                     <RemoveButton

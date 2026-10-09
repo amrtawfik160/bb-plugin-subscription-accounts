@@ -166,7 +166,8 @@ export const CLI_LOGIN_SPECS: Record<PoolProviderId, LoginSpec> = {
       CLAUDE_CODE_HOST_CREDS_FILE: "",
     },
     needsCode: true,
-    urlPattern: /https:\/\/(?:claude\.ai|console\.anthropic\.com|platform\.claude\.com)\/oauth\/authorize\S+/,
+    // Claude Code 2.1.29x prints claude.com/cai/oauth/authorize; older builds use claude.ai.
+    urlPattern: /https:\/\/(?:claude\.ai|claude\.com|console\.anthropic\.com|platform\.claude\.com)\/(?:[a-z]+\/)?oauth\/authorize\S+/,
     windowMs: 10 * 60_000,
   },
   codex: {
