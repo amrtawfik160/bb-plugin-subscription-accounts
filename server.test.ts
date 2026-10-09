@@ -291,6 +291,59 @@ sleep 5
     }
   });
 
+  it.each(["claude", "codex"] as const)("keeps an empty-pool page-added %s account inactive until Use now", async (provider) => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({})));
+    const { harness } = await setup();
+    const credentials = (id: string, token: string, email: string) => JSON.stringify(provider === "claude"
+      ? { claudeAiOauth: { accessToken: token, refreshToken: `${token}-refresh`, expiresAt: Date.now() + 3600000 } }
+      : { tokens: { account_id: id, access_token: token, refresh_token: `${token}-refresh`,
+        id_token: `h.${Buffer.from(JSON.stringify({ email })).toString("base64url")}.s` } });
+    const machine = credentials("machine-org", "machine-access", "machine@example.com");
+    const fresh = credentials("new-org", "fresh-access", "new@example.com");
+    const relativeFile = provider === "claude" ? ".claude/.credentials.json" : ".codex/auth.json";
+    const file = path.join(home!, relativeFile);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, machine);
+    const profileFile = path.join(home!, ".claude.json");
+    const machineProfile = JSON.stringify({ theme: "dark", oauthAccount: { accountUuid: "machine-org", emailAddress: "machine@example.com" } });
+    if (provider === "claude") await fs.writeFile(profileFile, machineProfile);
+    const bin = path.join(home!, "fake-bin");
+    await fs.mkdir(bin);
+    const profile = JSON.stringify({ oauthAccount: { accountUuid: "new-org", emailAddress: "new@example.com" } });
+    await fs.writeFile(path.join(bin, provider), `#!/bin/sh
+printf '%s\\n' '${provider === "claude" ? "https://claude.ai/oauth/authorize?fixture=empty" : "https://auth.openai.com/codex/device"}' 'ABCD-1234'
+${provider === "claude" ? "read code" : "sleep 0.2"}
+mkdir -p "$HOME/${path.dirname(relativeFile)}"
+printf '%s' '${fresh}' > "$HOME/${relativeFile}"
+${provider === "claude" ? `printf '%s' '${profile}' > "$CLAUDE_CONFIG_DIR/.claude.json"` : ""}
+sleep 5
+`, { mode: 0o700 });
+    vi.stubEnv("PATH", `${bin}:/usr/bin:/bin`);
+    await harness.behavior.callRpc("loginStart", { provider });
+    await vi.waitFor(async () => {
+      const view = rpcContract.overview.output.parse(await harness.behavior.callRpc("overview", null));
+      expect(view.login).toMatchObject({ status: "waiting", targetAccount: null });
+    });
+    if (provider === "claude") await harness.behavior.callRpc("loginSubmit", { code: "fixture#state" });
+    await vi.waitFor(async () => {
+      const view = rpcContract.overview.output.parse(await harness.behavior.callRpc("overview", null));
+      expect(view.login?.status).toBe("done");
+    }, { timeout: 8000 });
+    const afterAdd = rpcContract.overview.output.parse(await harness.behavior.callRpc("overview", null));
+    const section = afterAdd.swap.find((s) => s.id === provider)!;
+    expect(section.active).toBeNull();
+    expect(section.accounts).toHaveLength(1);
+    expect(section.accounts[0]).toMatchObject({ active: false, name: expect.any(String) });
+    expect(await fs.readFile(file, "utf8")).toBe(machine);
+    if (provider === "claude") expect(await fs.readFile(profileFile, "utf8")).toBe(machineProfile);
+    await harness.behavior.callRpc("use", { provider, name: section.accounts[0].name });
+    const afterUse = rpcContract.overview.output.parse(await harness.behavior.callRpc("overview", null));
+    const used = afterUse.swap.find((s) => s.id === provider)!;
+    expect(used.active).toBe(section.accounts[0].name);
+    expect(used.accounts[0].active).toBe(true);
+    expect(await fs.readFile(file, "utf8")).toBe(fresh);
+  });
+
   it("keeps saved and live credentials when cancel wins during a delayed credential save", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => Response.json(billing)));
     const { file, harness } = await setup();

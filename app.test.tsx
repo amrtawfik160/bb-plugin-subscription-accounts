@@ -107,6 +107,61 @@ describe("subscription usage page", () => {
     slot.lifecycle.unmount();
   });
 
+  it.each(["claude", "codex"] as const)("shows Ready and Use now for an inactive page-added %s account", async (provider) => {
+    const app = await loadPluginApp(() => import("./app"));
+    const data = fixture(ready);
+    const label = provider === "claude" ? "Claude" : "Codex";
+    const account = {
+      name: "new",
+      email: "new@example.com",
+      active: false,
+      exhaustedUntil: 0,
+      lastError: null,
+      usage: ready,
+    };
+    const use = vi.fn(async () => undefined);
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, {
+      rpc: {
+        overview: () => ({
+          ...data,
+          swap: [{ ...data.swap[0], id: provider, label, active: null, accounts: [account] }],
+        }),
+        use,
+      },
+    });
+    fireEvent.click(await slot.findByRole("tab", { name: new RegExp(label) }));
+    expect(slot.getByText("Ready")).toBeTruthy();
+    expect(slot.queryByText("In use")).toBeNull();
+    fireEvent.click(slot.getByRole("button", { name: "Use now" }));
+    await waitFor(() => expect(use).toHaveBeenCalledWith({ provider, name: "new" }));
+    slot.lifecycle.unmount();
+  });
+
+  it.each(["claude", "codex"] as const)("shows missing %s CLI setup once when saved accounts exist", async (provider) => {
+    const app = await loadPluginApp(() => import("./app"));
+    const data = fixture(ready);
+    const label = provider === "claude" ? "Claude" : "Codex";
+    const accounts = [
+      { name: "one", email: "one@example.com", active: false, exhaustedUntil: 0, lastError: null, usage: ready },
+      { name: "two", email: "two@example.com", active: false, exhaustedUntil: 0, lastError: null, usage: ready },
+    ];
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, {
+      rpc: {
+        overview: () => ({
+          ...data,
+          swap: [{ ...data.swap[0], id: provider, label, installed: false, active: null, accounts }],
+        }),
+      },
+    });
+    fireEvent.click(await slot.findByRole("tab", { name: new RegExp(label) }));
+    expect(slot.getAllByRole("link", { name: `Set up ${label} CLI` })).toHaveLength(1);
+    expect(slot.getAllByText(new RegExp(`Install the ${label} CLI on the bb server`))).toHaveLength(1);
+    expect(slot.queryByRole("button", { name: "Log in again for one" })).toBeNull();
+    expect(slot.queryByRole("button", { name: "Log in again for two" })).toBeNull();
+    expect(slot.queryByRole("button", { name: `Add ${label} account` })).toBeNull();
+    slot.lifecycle.unmount();
+  });
+
   it.each(["claude", "codex"] as const)("offers isolated recovery for an expired saved %s CLI login", async (provider) => {
     const app = await loadPluginApp(() => import("./app"));
     const data = fixture({ ...ready, status: "error", error: "The CLI session expired or its refresh token was replaced. Sign in again." });

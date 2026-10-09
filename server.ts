@@ -783,7 +783,7 @@ export default async function plugin(bb: BbPluginApi) {
           ensureActive();
           if (!expected) {
             return addAccount(fileLogin, undefined, body, {
-              makeActive: true,
+              makeActive: provider !== "claude" && provider !== "codex",
               home: sessionHome,
               beforeCommit: () => {
                 ensureActive();

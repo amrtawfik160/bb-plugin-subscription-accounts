@@ -537,6 +537,7 @@ function SignIn({
   };
 
   if (disabled && !open && (provider === "claude" || provider === "codex")) {
+    if (account) return null;
     return (
       <p role="status" className="text-sm text-muted-foreground">
         Install the {label} CLI on the bb server, then refresh this page. {" "}
