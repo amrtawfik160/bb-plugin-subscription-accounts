@@ -1,6 +1,3 @@
-// Subscription Accounts page: one tab per AI subscription. Each provider swaps
-// its saved login file when quota runs out. Claude and Codex sign in through
-// their own CLIs, then this page saves that login.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
@@ -660,8 +657,6 @@ function SignIn({
     </div>
   );
 }
-
-// ── Antigravity / Cursor / Grok ───────────────────────────────────────────
 
 function SwapTab({ section, data, rpc, run }: { section: SwapSection; data: Overview; rpc: Rpc; run: Run }) {
   const now = data.now;
