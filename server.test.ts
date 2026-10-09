@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createFakePluginHost, makeTurnFailedEvent } from "@get-bb/plugin-sdk/testing";
 import { DatabaseSync } from "node:sqlite";
-import plugin from "./server";
+import plugin, { rpcContract } from "./server";
 
 const billing = {
   config: {
@@ -178,9 +178,9 @@ sleep 5
     const fresh = credentials(result === "wrong organization" ? "uuid-wrong" : "uuid-test", "fresh-access");
     await fs.mkdir(path.dirname(file));
     await fs.writeFile(file, old);
-    const { name } = await harness.behavior.callRpc("saveCurrent", { provider: "codex" });
+    const { name } = rpcContract.saveCurrent.output.parse(await harness.behavior.callRpc("saveCurrent", { provider: "codex" }));
     await fs.writeFile(file, other);
-    const added = await harness.behavior.callRpc("saveCurrent", { provider: "codex" });
+    const added = rpcContract.saveCurrent.output.parse(await harness.behavior.callRpc("saveCurrent", { provider: "codex" }));
     await harness.behavior.callRpc("use", { provider: "codex", name: added.name });
     const bin = path.join(home!, "fake-bin");
     await fs.mkdir(bin);

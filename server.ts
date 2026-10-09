@@ -811,7 +811,9 @@ export default async function plugin(bb: BbPluginApi) {
               ensureActive();
               session.markCommitted();
               if (liveMatches) {
-                const files = [{ path: loginFile(fileLogin), before: fileLogin.liveBytes(previous!), after: fileLogin.liveBytes(body) }];
+                const files: { path: string; before: string | null; after: string }[] = [
+                  { path: loginFile(fileLogin), before: fileLogin.liveBytes(previous!), after: fileLogin.liveBytes(body) },
+                ];
                 const patched = fileLogin.profileBytes(liveProfile, body);
                 if (fileLogin.profilePath && patched !== null) {
                   files.unshift({ path: path.join(os.homedir(), fileLogin.profilePath), before: liveProfile, after: patched });
