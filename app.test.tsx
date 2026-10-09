@@ -684,6 +684,67 @@ describe("subscription usage page", () => {
     unavailable.lifecycle.unmount();
   });
 
+  it("renders model quota rows when plan metrics are empty and ready", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const modelOnly: AccountUsage = {
+      ...emptyUsage(),
+      status: "ready",
+      plan: "Pro",
+      fetchedAt: now,
+      metrics: [],
+      modelQuotas: [
+        {
+          label: "Gemini Pro",
+          used: null,
+          remaining: 25,
+          limit: 100,
+          unit: "percent",
+          resetAt: now + 3_600_000,
+          scope: { kind: "model", model: "pro" },
+        },
+      ],
+    };
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, { rpc: { overview: () => fixture(modelOnly) } });
+    expect(await slot.findByText("Gemini Pro")).toBeTruthy();
+    expect(slot.getByText("25% left")).toBeTruthy();
+    expect(slot.queryByText(/Usage could not be loaded/)).toBeNull();
+    fireEvent.click(slot.getByRole("tab", { name: "All" }));
+    const quotas = within(slot.getByRole("region", { name: "Antigravity quotas" }));
+    expect(quotas.getByText("Gemini Pro")).toBeTruthy();
+    expect(quotas.getByText("25% left")).toBeTruthy();
+    expect(quotas.queryByText(/Quota unavailable/)).toBeNull();
+    slot.lifecycle.unmount();
+  });
+
+  it("keeps Cancel available while verifying a re-login", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const loginCancel = vi.fn(async () => null);
+    const loginStart = vi.fn(async () => ({
+      id: "verify-session",
+      provider: "antigravity",
+      targetAccount: "test-account",
+      status: "verifying",
+      url: "https://accounts.google.com/test",
+      userCode: null,
+      needsCode: true,
+      expiresAt: now + 58_000,
+      error: null,
+      account: null,
+    }));
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, {
+      rpc: { overview: () => fixture(ready), loginStart, loginCancel },
+    });
+    fireEvent.click(await slot.findByRole("button", { name: "Log in again for test-account" }));
+    expect(await slot.findByText(/Saving the login|Signing in/)).toBeTruthy();
+    const cancel = slot.getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
+    expect(cancel.disabled).toBe(false);
+    fireEvent.click(cancel);
+    expect(await slot.findByText("Sign-in cancelled. Your saved accounts were kept.")).toBeTruthy();
+    expect(loginCancel).toHaveBeenCalledTimes(1);
+    expect(slot.getByRole("button", { name: "Log in again for test-account" })).toBeTruthy();
+    slot.lifecycle.unmount();
+  });
+
   it("shows local Codex usage while the pooler is disabled", async () => {
     const app = await loadPluginApp(() => import("./app"));
     const refresh = vi.fn(async () => null);

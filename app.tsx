@@ -388,6 +388,7 @@ function UsageDetails({
   const stale =
     usage.fetchedAt !== null && (now - usage.fetchedAt >= USAGE_TTL_MS || usage.status === "error");
   const loginExpired = Boolean(actions && usage.error && /sign in again|login expired|session expired|access expired/i.test(usage.error));
+  const quotaRows = [...usage.metrics, ...(usage.modelQuotas ?? [])];
   return (
     <div className="space-y-3 pt-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -416,10 +417,10 @@ function UsageDetails({
         </Button>
       </div>
       {actions}
-      {usage.metrics.length > 0 ? (
+      {quotaRows.length > 0 ? (
         <div className="grid grid-cols-1 gap-x-6 gap-y-4 sm:grid-cols-2">
-          {usage.metrics.map((row) => (
-            <QuotaMeter key={row.label} row={row} now={now} />
+          {quotaRows.map((row) => (
+            <QuotaMeter key={row.scope?.kind === "model" ? `model:${row.scope.model}` : row.label} row={row} now={now} />
           ))}
         </div>
       ) : !usage.error ? (
@@ -441,7 +442,7 @@ function UsageDetails({
       {usage.error ? (
         <p role="status" className="break-words text-xs text-destructive">
           {loginExpired ? "Login expired. Log in again to load usage." : usage.error}
-          {usage.metrics.length > 0 ? " Showing the last successful reading." : ""}
+          {quotaRows.length > 0 ? " Showing the last successful reading." : ""}
         </p>
       ) : null}
       {usage.history ? (
@@ -548,7 +549,7 @@ function SignIn({
     <div className="w-full min-w-0 space-y-4 rounded-lg border border-border bg-card p-4" aria-busy={status === "starting" || status === "verifying"}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="min-w-0 break-words font-medium">{account ? `Log in again for ${account.name}` : `Add a ${label} account`}</h3>
-        <Button size="sm" variant="ghost" className="min-h-11 sm:min-h-8" onClick={cancel} disabled={status === "starting" || status === "verifying"}>
+        <Button size="sm" variant="ghost" className="min-h-11 sm:min-h-8" onClick={cancel} disabled={status === "starting"}>
           Cancel
         </Button>
       </div>
@@ -1169,16 +1170,22 @@ function AllQuotas({ data, onOpenProvider }: { data: Overview; onOpenProvider: (
                 </Button>
               </div>
               <div className="space-y-4">
-                {usageRows.map(({ key, name, usage }) => (
+                {usageRows.map(({ key, name, usage }) => {
+                  const quotaRows = [...usage.metrics, ...(usage.modelQuotas ?? [])];
+                  return (
                   <div key={key} className="space-y-2">
                     <p className="break-words text-xs text-muted-foreground">
                       {name}
                       {usage.plan ? ` · ${usage.plan}` : ""}
                     </p>
-                    {usage.metrics.length ? (
+                    {quotaRows.length ? (
                       <div className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
-                        {usage.metrics.map((metric) => (
-                          <QuotaMeter key={metric.label} row={metric} now={data.now} />
+                        {quotaRows.map((metric) => (
+                          <QuotaMeter
+                            key={metric.scope?.kind === "model" ? `model:${metric.scope.model}` : metric.label}
+                            row={metric}
+                            now={data.now}
+                          />
                         ))}
                       </div>
                     ) : (
@@ -1191,11 +1198,12 @@ function AllQuotas({ data, onOpenProvider }: { data: Overview; onOpenProvider: (
                     {usage.error ? (
                       <p className="break-words text-xs text-destructive">
                         {usage.error}
-                        {usage.metrics.length ? " · Last known usage" : ""}
+                        {quotaRows.length ? " · Last known usage" : ""}
                       </p>
                     ) : null}
                   </div>
-                ))}
+                  );
+                })}
                 {accounts.map((account) => (
                   <div key={account.id} className="space-y-2">
                     <p className="break-words text-xs text-muted-foreground">
