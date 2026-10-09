@@ -198,7 +198,7 @@ export const rpcContract = defineRpcContract({
     output: loginSchema,
   },
   loginSubmit: { input: z.object({ code: z.string() }), output: loginSchema },
-  loginCancel: { input: z.null(), output: ok },
+  loginCancel: { input: z.null(), output: z.object({ kept: z.boolean() }) },
   poolEnable: { input: z.null(), output: ok },
   poolImport: { input: z.object({ provider: poolIdSchema }), output: ok },
   poolUse: { input: z.object({ id: z.string().min(1) }), output: ok },
@@ -752,14 +752,22 @@ export default async function plugin(bb: BbPluginApi) {
             }
           },
           async (tokenFile, sessionHome) => {
+            const cancelled = () => {
+              throw new Error("Sign-in cancelled. Your saved login was kept.");
+            };
+            const ensureActive = () => {
+              if (!session.active) cancelled();
+            };
             const body = await fs.readFile(tokenFile, "utf8");
+            ensureActive();
             const fileLogin = fileLoginFor(spec.id);
             if (!expected) return addAccount(fileLogin, undefined, body, { makeActive: true, home: sessionHome });
             const identity = fileLogin.identify(body);
             const email = identity.email ?? await whoami(spec, sessionHome);
+            ensureActive();
             const saved = await mutate(provider, async (state) => {
               const meta = requireAccount(state, expected.name);
-              if (!session.active) throw new Error("Sign-in cancelled. Your saved login was kept.");
+              ensureActive();
               if (meta.addedAt !== expected.addedAt || meta.key !== expected.key) {
                 throw new Error("This saved account changed during sign-in. Try again.");
               }
@@ -768,8 +776,13 @@ export default async function plugin(bb: BbPluginApi) {
                 throw new Error(`Sign in with ${meta.email ?? meta.name}. Your saved login was kept.`);
               }
               const previous = readToken(provider, meta.name);
-              if (state.active === meta.name && previous && await readLiveRaw(fileLogin) === previous) {
-                await replaceLoginFiles([{ path: loginFile(fileLogin), before: previous, after: body }]);
+              const liveMatches = Boolean(
+                state.active === meta.name && previous && (await readLiveRaw(fileLogin)) === previous,
+              );
+              ensureActive();
+              session.markCommitted();
+              if (liveMatches) {
+                await replaceLoginFiles([{ path: loginFile(fileLogin), before: previous!, after: body }]);
               }
               writeToken(provider, meta.name, body);
               meta.key = identity.key;
@@ -778,7 +791,7 @@ export default async function plugin(bb: BbPluginApi) {
               usage.remove(usageKey(provider, meta.name));
               return meta.name;
             });
-            await refreshUsage(provider, saved, true, { syncLive: false });
+            if (session.active) await refreshUsage(provider, saved, true, { syncLive: false });
             return saved;
           },
           expected?.name ?? null,
@@ -1320,10 +1333,11 @@ export default async function plugin(bb: BbPluginApi) {
     loginStart: async ({ provider, name }) => startLogin(provider, name),
     loginSubmit: async ({ code }) => submitLogin(code),
     loginCancel: async () => {
+      const kept = !swapLogin?.committed;
       stopLogins();
       login = null;
       changed();
-      return null;
+      return { kept };
     },
     poolEnable: async () => {
       throw new Error(POOLER_STAYS_OFF);

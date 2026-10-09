@@ -135,6 +135,16 @@ export class LoginSession {
     this.fail("Cancelled.");
   }
 
+  private _committed = false;
+
+  markCommitted(): void {
+    this._committed = true;
+  }
+
+  get committed(): boolean {
+    return this._committed;
+  }
+
   get active(): boolean {
     return !this.finished;
   }
@@ -186,9 +196,10 @@ export class LoginSession {
             this.fail((error as Error).message);
             return;
           }
-          if (this.finished) return;
           this.state.status = "done";
-          this.finish();
+          this.state.error = null;
+          if (!this.finished) this.finish();
+          else this.onChange();
           return;
         }
       } catch (error) {

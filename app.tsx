@@ -388,7 +388,7 @@ function UsageDetails({
   const stale =
     usage.fetchedAt !== null && (now - usage.fetchedAt >= USAGE_TTL_MS || usage.status === "error");
   const loginExpired = Boolean(actions && usage.error && /sign in again|login expired|session expired|access expired/i.test(usage.error));
-  const quotaRows = [...usage.metrics, ...(usage.modelQuotas ?? [])];
+  const quotaRows = [...usage.metrics.filter((row) => !row.derivedFromModels), ...(usage.modelQuotas ?? [])];
   return (
     <div className="space-y-3 pt-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -515,8 +515,8 @@ function SignIn({
   };
   const cancel = () => {
     void run(async () => {
-      if (mine) await rpc.call("loginCancel");
-      setAttempt({ kind: "cancelled" });
+      const result = mine ? await rpc.call("loginCancel") : { kept: true };
+      setAttempt(result.kept ? { kind: "cancelled" } : { kind: "closed" });
       setCode("");
     });
   };
@@ -1171,7 +1171,7 @@ function AllQuotas({ data, onOpenProvider }: { data: Overview; onOpenProvider: (
               </div>
               <div className="space-y-4">
                 {usageRows.map(({ key, name, usage }) => {
-                  const quotaRows = [...usage.metrics, ...(usage.modelQuotas ?? [])];
+                  const quotaRows = [...usage.metrics.filter((row) => !row.derivedFromModels), ...(usage.modelQuotas ?? [])];
                   return (
                   <div key={key} className="space-y-2">
                     <p className="break-words text-xs text-muted-foreground">

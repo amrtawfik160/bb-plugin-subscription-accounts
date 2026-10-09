@@ -100,7 +100,7 @@ describe("subscription usage page", () => {
       url: "https://accounts.google.com/test", userCode: null, needsCode: true,
       expiresAt: now + 58_000, error: null, account: null,
     });
-    const loginCancel = vi.fn(async () => null);
+    const loginCancel = vi.fn(async () => ({ kept: true }));
     const slot = renderSlot(app.navPanels[0], { subPath: "" }, {
       rpc: { overview: () => fixture(ready), loginStart, loginCancel },
     });
@@ -716,9 +716,60 @@ describe("subscription usage page", () => {
     slot.lifecycle.unmount();
   });
 
+  it("omits derived plan rows when provider-reported model quotas are shown", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const mixed: AccountUsage = {
+      ...emptyUsage(),
+      status: "ready",
+      plan: "Pro",
+      fetchedAt: now,
+      metrics: [
+        {
+          label: "Gemini · 5 hours",
+          used: 40,
+          remaining: 60,
+          limit: 100,
+          unit: "percent",
+          resetAt: now + 3_600_000,
+          derivedFromModels: true,
+        },
+        {
+          label: "Gemini · weekly",
+          used: 10,
+          remaining: 90,
+          limit: 100,
+          unit: "percent",
+          resetAt: now + 86_400_000,
+        },
+      ],
+      modelQuotas: [
+        {
+          label: "Gemini Pro",
+          used: null,
+          remaining: 25,
+          limit: 100,
+          unit: "percent",
+          resetAt: now + 3_600_000,
+          scope: { kind: "model", model: "pro" },
+        },
+      ],
+    };
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, { rpc: { overview: () => fixture(mixed) } });
+    expect(await slot.findByText("Gemini Pro")).toBeTruthy();
+    expect(slot.getByText("25% left")).toBeTruthy();
+    expect(slot.getByText("Gemini · weekly")).toBeTruthy();
+    expect(slot.queryByText("Gemini · 5 hours")).toBeNull();
+    fireEvent.click(slot.getByRole("tab", { name: "All" }));
+    const quotas = within(slot.getByRole("region", { name: "Antigravity quotas" }));
+    expect(quotas.getByText("Gemini Pro")).toBeTruthy();
+    expect(quotas.getByText("Gemini · weekly")).toBeTruthy();
+    expect(quotas.queryByText("Gemini · 5 hours")).toBeNull();
+    slot.lifecycle.unmount();
+  });
+
   it("keeps Cancel available while verifying a re-login", async () => {
     const app = await loadPluginApp(() => import("./app"));
-    const loginCancel = vi.fn(async () => null);
+    const loginCancel = vi.fn(async () => ({ kept: true }));
     const loginStart = vi.fn(async () => ({
       id: "verify-session",
       provider: "antigravity",
@@ -741,6 +792,33 @@ describe("subscription usage page", () => {
     fireEvent.click(cancel);
     expect(await slot.findByText("Sign-in cancelled. Your saved accounts were kept.")).toBeTruthy();
     expect(loginCancel).toHaveBeenCalledTimes(1);
+    expect(slot.getByRole("button", { name: "Log in again for test-account" })).toBeTruthy();
+    slot.lifecycle.unmount();
+  });
+
+  it("does not claim accounts were kept when cancel arrives after credentials committed", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const loginCancel = vi.fn(async () => ({ kept: false }));
+    const loginStart = vi.fn(async () => ({
+      id: "committed-session",
+      provider: "antigravity",
+      targetAccount: "test-account",
+      status: "verifying",
+      url: "https://accounts.google.com/test",
+      userCode: null,
+      needsCode: true,
+      expiresAt: now + 58_000,
+      error: null,
+      account: null,
+    }));
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, {
+      rpc: { overview: () => fixture(ready), loginStart, loginCancel },
+    });
+    fireEvent.click(await slot.findByRole("button", { name: "Log in again for test-account" }));
+    expect(await slot.findByText(/Saving the login|Signing in/)).toBeTruthy();
+    fireEvent.click(slot.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(loginCancel).toHaveBeenCalledTimes(1));
+    expect(slot.queryByText("Sign-in cancelled. Your saved accounts were kept.")).toBeNull();
     expect(slot.getByRole("button", { name: "Log in again for test-account" })).toBeTruthy();
     slot.lifecycle.unmount();
   });

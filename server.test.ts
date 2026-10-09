@@ -120,13 +120,44 @@ sleep 5
     await fakeGrokLogin(savedLogin.replace("test-access", "fresh-access"));
     await harness.behavior.callRpc("loginStart", { provider: "grok", name: "test" });
     await expect(harness.behavior.callRpc("loginStart", { provider: "grok" })).rejects.toThrow("Finish or cancel");
-    await harness.behavior.callRpc("loginCancel", null);
+    await expect(harness.behavior.callRpc("loginCancel", null)).resolves.toEqual({ kept: true });
     await new Promise((resolve) => setTimeout(resolve, 1_600));
     const overview: any = await harness.behavior.callRpc("overview", null);
     expect(overview.login).toBeNull();
     expect(await fs.readFile(file, "utf8")).toBe(savedLogin);
     await harness.behavior.callRpc("use", { provider: "grok", name: "test" });
     expect(await fs.readFile(file, "utf8")).toBe(savedLogin);
+  });
+
+  it("keeps saved and live credentials when cancel wins during a delayed credential save", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(billing)));
+    const { file, harness } = await setup();
+    const fresh = savedLogin.replace("test-access", "fresh-access").replace("test-refresh", "fresh-refresh");
+    await fakeGrokLogin(fresh);
+    const livePath = file;
+    const originalReadFile = fs.readFile.bind(fs);
+    let releaseLive: () => void = () => {};
+    const holdLive = new Promise<void>((resolve) => {
+      releaseLive = resolve;
+    });
+    let liveReadPending = false;
+    vi.spyOn(fs, "readFile").mockImplementation(async (target, options) => {
+      if (String(target) === livePath) {
+        liveReadPending = true;
+        await holdLive;
+      }
+      return originalReadFile(target, options as BufferEncoding);
+    });
+    await harness.behavior.callRpc("loginStart", { provider: "grok", name: "test" });
+    await vi.waitFor(() => expect(liveReadPending).toBe(true), { timeout: 8_000 });
+    await expect(harness.behavior.callRpc("loginCancel", null)).resolves.toEqual({ kept: true });
+    releaseLive();
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const overview: any = await harness.behavior.callRpc("overview", null);
+    expect(overview.login).toBeNull();
+    expect(await originalReadFile(file, "utf8")).toBe(savedLogin);
+    await harness.behavior.callRpc("use", { provider: "grok", name: "test" });
+    expect(await originalReadFile(file, "utf8")).toBe(savedLogin);
   });
 
   it.each([
