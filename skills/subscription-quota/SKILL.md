@@ -1,6 +1,6 @@
 ---
 name: subscription-quota
-description: "Check remaining AI subscription quota and available models before choosing a provider, account, or model, or when a task hits a usage limit."
+description: "Check remaining AI subscription quota before choosing a provider, account, or model, or when a task hits a usage limit."
 ---
 
 # Check subscription quota
@@ -13,8 +13,6 @@ description: "Check remaining AI subscription quota and available models before 
 `limits` keeps provider units such as percent, USD, requests, and credits. Percent values come from provider percentages or reported fractions multiplied by 100. They do not imply a token or request budget.
 
 A limit without `scope` belongs to the account or plan. A `group` shares quota among a model group. A `feature` names a metered feature. Only `model` supplies a model-specific quota. Do not assign shared limits to individual models or add shared and model limits together.
-
-`catalogs` lists models available to the provider on this host. Catalog availability is separate from a saved account's quota. A catalog entry without a model-specific limit has unknown model quota. An unavailable catalog has status `unknown`.
 
 `remaining: null` means unknown, including failed or stale readings. `lastKnownRemaining` is historical evidence, not current allowance. `retrievedAt` is the last successful reading. `checkedAt` is the latest quota request. A missing reset time is unknown.
 

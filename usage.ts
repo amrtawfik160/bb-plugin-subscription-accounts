@@ -276,7 +276,7 @@ export function mapCursor(
     ["autoPercentUsed", "Cursor models"],
     ["apiPercentUsed", "Other models"],
   ]) {
-    const row = metric(label, number(plan[key] ?? restPlan[key]), null, "percent", resetAt);
+    const row = metric(label, number(plan[key] ?? restPlan[key]), 100, "percent", resetAt);
     if (row) add({ ...row, scope: { kind: "group", group: label } });
   }
   const spend = object(root.spendLimitUsage);

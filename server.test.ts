@@ -52,8 +52,8 @@ describe("subscription usage RPC", () => {
     expect(result.exitCode).toBe(0);
     const report = JSON.parse(result.stdout!);
     expect(report.accounts).toMatchObject([{ provider: "grok", account: "test", email: "test@example.com", active: true, status: "ready", limits: [{ label: "Weekly pool", remaining: 60, unit: "percent" }] }]);
-    expect(report.catalogs).toEqual([{ provider: "grok", status: "unknown", models: [] }]);
-    expect(result.stdout).not.toMatch(/test-access|test-refresh/);
+    expect(report).not.toHaveProperty("catalogs");
+    expect(result.stdout).not.toMatch(/available models|test-access|test-refresh/);
     fetcher.mockImplementation(async () => new Response("down", { status: 503 }));
     const failed = await harness.behavior.runCli(["quota", "grok", "--refresh", "--json"]);
     expect(JSON.parse(failed.stdout!).accounts[0]).toMatchObject({ status: "error", limits: [{ remaining: null, lastKnownRemaining: 60 }] });

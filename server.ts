@@ -58,7 +58,7 @@ import { HistoryCache } from "./history.js";
 import { sqliteHistoryStore } from "./history-store.js";
 import { PricingStore } from "./pricing.js";
 import { historySchema } from "./history-schema.js";
-import { quotaAccount, renderQuotas, type ModelCatalog, type QuotaAccount, type QuotaReport } from "./quotas.js";
+import { quotaAccount, renderQuotas, type QuotaAccount, type QuotaReport } from "./quotas.js";
 import {
   type PoolProviderId,
   SWAP_IDS,
@@ -1409,7 +1409,7 @@ export default async function plugin(bb: BbPluginApi) {
       },
       {
         name: "quota",
-        summary: "Show saved accounts' current quota and available models; unknown data stays unknown",
+        summary: "Show saved accounts' current plan and model quota remaining; unknown data stays unknown",
         usage: "bb subs quota [<provider>] [--refresh] [--json]",
       },
       {
@@ -1462,7 +1462,6 @@ export default async function plugin(bb: BbPluginApi) {
             if (chosen && !chosen.success) throw new Error(`Provider must be one of ${stackList}.`);
             const ids = chosen?.success ? [chosen.data] : STACK_IDS;
             const accounts: QuotaAccount[] = [];
-            const catalogs: ModelCatalog[] = [];
             for (const id of ids) {
               const state = await loadPool(id);
               for (const name of state.order) {
@@ -1470,16 +1469,8 @@ export default async function plugin(bb: BbPluginApi) {
                 const meta = state.accounts[name];
                 accounts.push(quotaAccount({ provider: id, account: name, email: meta.email, active: state.active === name }, usage.get(usageKey(id, name)), Date.now()));
               }
-              if (!state.order.length) continue;
-              const providerId = isSwapId(id) ? SWAP_PROVIDERS[id].bbProviderIds[0] : id === "claude" ? "claude-code" : "codex";
-              try {
-                const catalog = await bb.sdk.providers.models({ providerId, signal: AbortSignal.any([usageController.signal, AbortSignal.timeout(15_000)]) });
-                catalogs.push({ provider: id, status: catalog.modelLoadError ? "unknown" : "ready", models: catalog.models.map((model) => ({ id: model.model, label: model.displayName })) });
-              } catch {
-                catalogs.push({ provider: id, status: "unknown", models: [] });
-              }
             }
-            const report: QuotaReport = { now: Date.now(), accounts, catalogs };
+            const report: QuotaReport = { now: Date.now(), accounts };
             return done(json ? JSON.stringify(report, null, 2) : renderQuotas(report));
           }
           case "list": {

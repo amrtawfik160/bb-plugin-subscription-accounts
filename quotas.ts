@@ -15,16 +15,9 @@ export interface QuotaAccount {
   limits: (UsageMetric & { lastKnownRemaining: number | null })[];
 }
 
-export interface ModelCatalog {
-  provider: ProviderId;
-  status: "ready" | "unknown";
-  models: { id: string; label: string }[];
-}
-
 export interface QuotaReport {
   now: number;
   accounts: QuotaAccount[];
-  catalogs: ModelCatalog[];
 }
 
 export function quotaAccount(
@@ -67,8 +60,5 @@ export function renderQuotas(report: QuotaReport): string {
     }
   }
   if (!report.accounts.length) lines.push("", "No saved accounts configured.");
-  for (const catalog of report.catalogs) {
-    lines.push("", `${catalog.provider} available models [${catalog.status}]: ${catalog.models.map((model) => `${model.id} (${model.label})`).join(", ") || "unknown"}`);
-  }
   return lines.join("\n");
 }
