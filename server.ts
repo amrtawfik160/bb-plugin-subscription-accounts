@@ -456,11 +456,17 @@ export default async function plugin(bb: BbPluginApi) {
     login: FileLogin,
     rawName: string | undefined,
     body: string,
-    options: { force?: boolean; makeActive?: boolean; home?: string } = {},
+    options: {
+      force?: boolean;
+      makeActive?: boolean;
+      home?: string;
+      beforeCommit?: () => void;
+    } = {},
   ): Promise<string> {
     const identity = login.identify(body);
     const swap = isSwapId(login.id) ? SWAP_PROVIDERS[login.id] : null;
     const email = identity.email ?? (swap ? await whoami(swap, options.home) : null);
+    options.beforeCommit?.();
     return mutate(login.id, async (state) => {
       const clash = Object.values(state.accounts).find((meta) => meta.key === identity.key);
       const name = rawName?.trim()
@@ -761,7 +767,16 @@ export default async function plugin(bb: BbPluginApi) {
             const body = await fs.readFile(tokenFile, "utf8");
             ensureActive();
             const fileLogin = fileLoginFor(spec.id);
-            if (!expected) return addAccount(fileLogin, undefined, body, { makeActive: true, home: sessionHome });
+            if (!expected) {
+              return addAccount(fileLogin, undefined, body, {
+                makeActive: true,
+                home: sessionHome,
+                beforeCommit: () => {
+                  ensureActive();
+                  session.markCommitted();
+                },
+              });
+            }
             const identity = fileLogin.identify(body);
             const email = identity.email ?? await whoami(spec, sessionHome);
             ensureActive();
@@ -791,7 +806,7 @@ export default async function plugin(bb: BbPluginApi) {
               usage.remove(usageKey(provider, meta.name));
               return meta.name;
             });
-            if (session.active) await refreshUsage(provider, saved, true, { syncLive: false });
+            await refreshUsage(provider, saved, true, { syncLive: false });
             return saved;
           },
           expected?.name ?? null,

@@ -160,6 +160,80 @@ sleep 5
     expect(await originalReadFile(file, "utf8")).toBe(savedLogin);
   });
 
+  it("keeps accounts unchanged when cancel wins during delayed Add-account identity lookup", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(billing)));
+    const { harness } = await setup();
+    const waiting = path.join(home!, "whoami-waiting");
+    const release = path.join(home!, "release-whoami");
+    const accessToken = `h.${Buffer.from(JSON.stringify({ sub: "cursor-user-1" })).toString("base64url")}.s`;
+    const cursorBody = JSON.stringify({ accessToken, refreshToken: "cursor-refresh-new" });
+    const bin = path.join(home!, "fake-bin");
+    await fs.mkdir(bin, { recursive: true });
+    await fs.writeFile(path.join(bin, "cursor-agent"), `#!/bin/sh
+if [ "$1" = "status" ]; then
+  touch '${waiting}'
+  while [ ! -f '${release}' ]; do sleep 0.05; done
+  printf '%s\\n' 'Logged in as new@example.com'
+  exit 0
+fi
+printf '%s\\n' 'https://cursor.com/loginDeepControl?test=1'
+sleep 0.2
+mkdir -p "$HOME/.config/cursor"
+printf '%s' '${cursorBody}' > "$HOME/.config/cursor/auth.json"
+sleep 5
+`, { mode: 0o700 });
+    vi.stubEnv("PATH", `${bin}:/usr/bin:/bin`);
+    await harness.behavior.callRpc("loginStart", { provider: "cursor" });
+    await vi.waitFor(async () => {
+      await fs.access(waiting);
+    }, { timeout: 8_000 });
+    const before = await harness.behavior.callRpc("overview", null) as any;
+    const beforeCursor = before.swap.find((s: any) => s.id === "cursor");
+    expect(beforeCursor.accounts).toEqual([]);
+    await expect(harness.behavior.callRpc("loginCancel", null)).resolves.toEqual({ kept: true });
+    await fs.writeFile(release, "ok");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const overview: any = await harness.behavior.callRpc("overview", null);
+    expect(overview.login).toBeNull();
+    const cursor = overview.swap.find((s: any) => s.id === "cursor");
+    expect(cursor.accounts).toEqual([]);
+  });
+
+  it("refreshes usage after re-login commit even when cancel arrives during live replacement", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(billing)));
+    const { file, harness } = await setup();
+    const fresh = savedLogin.replace("test-access", "fresh-access").replace("test-refresh", "fresh-refresh");
+    await fakeGrokLogin(fresh);
+    const originalWriteFile = fs.writeFile.bind(fs);
+    let releaseSwitch: () => void = () => {};
+    const holdSwitch = new Promise<void>((resolve) => {
+      releaseSwitch = resolve;
+    });
+    let switchPending = false;
+    vi.spyOn(fs, "writeFile").mockImplementation(async (target, data, options) => {
+      if (String(target).includes(".switch")) {
+        switchPending = true;
+        await holdSwitch;
+      }
+      return originalWriteFile(target, data, options as Parameters<typeof originalWriteFile>[2]);
+    });
+    await harness.behavior.callRpc("loginStart", { provider: "grok", name: "test" });
+    await vi.waitFor(() => expect(switchPending).toBe(true), { timeout: 8_000 });
+    await expect(harness.behavior.callRpc("loginCancel", null)).resolves.toEqual({ kept: false });
+    releaseSwitch();
+    await vi.waitFor(async () => {
+      expect(await fs.readFile(file, "utf8")).toBe(fresh);
+      const overview: any = await harness.behavior.callRpc("overview", null);
+      expect(overview.login).toBeNull();
+      const grok = overview.swap.find((s: any) => s.id === "grok");
+      expect(grok.accounts).toHaveLength(1);
+      expect(grok.accounts[0]).toMatchObject({
+        name: "test",
+        usage: { status: "ready", metrics: [{ label: "Weekly pool", remaining: 60 }] },
+      });
+    }, { timeout: 8_000 });
+  });
+
   it.each([
     ["codex", true], ["claude", true], ["codex", false], ["claude", false],
   ] as const)("switches the %s machine login and preserves its previous login (saved: %s)", async (provider, saved) => {
