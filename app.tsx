@@ -1172,6 +1172,9 @@ function AllQuotas({ data, onOpenProvider }: { data: Overview; onOpenProvider: (
               <div className="space-y-4">
                 {usageRows.map(({ key, name, usage }) => {
                   const quotaRows = [...usage.metrics.filter((row) => !row.derivedFromModels), ...(usage.modelQuotas ?? [])];
+                  const loginExpired =
+                    Boolean(usage.error) &&
+                    /sign in again|login expired|session expired|access expired/i.test(usage.error!);
                   return (
                   <div key={key} className="space-y-2">
                     <p className="break-words text-xs text-muted-foreground">
@@ -1197,7 +1200,7 @@ function AllQuotas({ data, onOpenProvider }: { data: Overview; onOpenProvider: (
                     )}
                     {usage.error ? (
                       <p className="break-words text-xs text-destructive">
-                        {usage.error}
+                        {loginExpired ? "Login expired. Log in again to load usage." : usage.error}
                         {quotaRows.length ? " · Last known usage" : ""}
                       </p>
                     ) : null}
@@ -1230,7 +1233,10 @@ function AllQuotas({ data, onOpenProvider }: { data: Overview; onOpenProvider: (
                     </div>
                     {local.usage.error ? (
                       <p className="break-words text-xs text-destructive">
-                        {local.usage.error} · Last known usage
+                        {/sign in again|login expired|session expired|access expired/i.test(local.usage.error)
+                          ? "Login expired. Log in again to load usage."
+                          : local.usage.error}{" "}
+                        · Last known usage
                       </p>
                     ) : null}
                   </div>

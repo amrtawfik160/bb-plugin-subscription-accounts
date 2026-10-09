@@ -93,6 +93,25 @@ describe("subscription usage page", () => {
     slot.lifecycle.unmount();
   });
 
+  it("shows concise login-expired copy on the All quotas tab", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, {
+      rpc: {
+        overview: () => fixture({
+          ...emptyUsage(),
+          status: "error",
+          error: "Antigravity login expired. Refresh the CLI login or configure its OAuth client in plugin settings.",
+        }),
+      },
+    });
+    fireEvent.click(await slot.findByRole("tab", { name: "All" }));
+    const quotas = within(slot.getByRole("region", { name: "Antigravity quotas" }));
+    expect(quotas.getByText("Login expired. Log in again to load usage.")).toBeTruthy();
+    expect(quotas.queryByText(/configure its OAuth client/)).toBeNull();
+    expect(quotas.queryByText(/Antigravity login expired/)).toBeNull();
+    slot.lifecycle.unmount();
+  });
+
   it("shows sign-in start failures inline and reports cancellation after retry", async () => {
     const app = await loadPluginApp(() => import("./app"));
     const loginStart = vi.fn().mockRejectedValueOnce(new Error("The CLI is not installed.")).mockResolvedValueOnce({
