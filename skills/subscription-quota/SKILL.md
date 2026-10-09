@@ -8,7 +8,7 @@ description: "Check remaining AI subscription quota before choosing a provider, 
 1. Run `bb subs quota --json` for all saved subscription accounts. Add a provider name to inspect one provider.
 2. Read each account's plan, status, retrieval time, and limits. Use `bb subs quota` for a readable report.
 3. If data is stale or a new reading is needed, run `bb subs quota --refresh --json`. The command normally refreshes readings older than five minutes.
-4. If login expired, report quota as unknown. The owner can use **Log in again** beside the saved Antigravity, Cursor, or Grok account. Claude and Codex require their CLI login, then **Save it**.
+4. If login expired, report quota as unknown. The owner can use **Log in again** beside the saved account (isolated CLI sign-in for every provider, including Claude and Codex).
 
 `limits` keeps provider units such as percent, USD, requests, and credits. Percent values come from provider percentages or reported fractions multiplied by 100. They do not imply a token or request budget.
 

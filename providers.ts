@@ -18,7 +18,7 @@ export interface LoginSpec {
   binary: string;
   args: string[];
   env?: Record<string, string>;
-  /** agy wants the Google code pasted back; the others poll the browser. */
+  /** When true, paste a consent code; otherwise the CLI polls the browser. */
   needsCode: boolean;
   urlPattern: RegExp;
   /** Device-code flows show a short code the user confirms in the browser. */

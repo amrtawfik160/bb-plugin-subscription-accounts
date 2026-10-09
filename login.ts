@@ -2,8 +2,8 @@
 //
 // Each CLI runs with HOME pointed at a fresh folder, so the machine's current
 // login stays untouched, and under `script`, which gives it the terminal it
-// needs before it prints a sign-in link. agy then reads a pasted code from that
-// terminal; Cursor and Grok poll until the browser step is done.
+// needs before it prints a sign-in link. agy and Claude then read a pasted code
+// from that terminal; Cursor, Grok and Codex poll until the browser step is done.
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { constants } from "node:fs";
@@ -123,7 +123,7 @@ export class LoginSession {
     child.on("error", (error) => this.fail(`Could not start ${this.spec.binary}: ${error.message}`));
     child.on("exit", () => {
       if (this.finished || this.state.status !== "waiting") return;
-      // Cursor and Grok exit once the browser step is done; give the file a moment.
+      // Browser-poll CLIs exit once the browser step is done; give the file a moment.
       if (!this.spec.needsCode) {
         setTimeout(() => {
           if (!this.finished && !this.watching) this.fail("Sign-in ended before a login was saved. Try again.");

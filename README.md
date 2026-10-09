@@ -47,7 +47,8 @@ Demo screenshots use sample accounts and usage.
   provider's page, and the login is saved. Your current login on the machine
   is never touched or logged out. **Add Claude account** uses a browser link
   and pasted consent code. **Add Codex account** uses a browser link and device
-  code. Cancel before saving keeps the existing accounts.
+  code. Page-added Claude and Codex accounts stay Ready until you choose
+  **Use now**. Cancel before saving keeps the existing accounts.
 - **Renews an expired login.** **Log in again** reauthenticates that same saved
   account through its provider CLI, keeps its name, order and active selection,
   then refreshes usage. Claude uses a browser link and pasted consent code.
@@ -97,8 +98,9 @@ that reads the new login.
 (and `~/.claude.json`) and `~/.codex/auth.json`. This plugin saves a copy of
 each login and swaps the file when a 5-hour or weekly limit is hit. New threads
 use that login directly. The Account Pooler stays off. Choose **Add Claude
-account** or **Add Codex account** to sign in from the page. To save a login
-already on the machine, choose **Save it** on that provider's tab.
+account** or **Add Codex account** to sign in from the page; the new account
+stays inactive until **Use now**. To save a login already on the machine,
+choose **Save it** on that provider's tab.
 
 ## Install
 
