@@ -69,6 +69,27 @@ const ready: AccountUsage = {
 };
 
 describe("subscription usage page", () => {
+  it.each(["claude", "codex"] as const)("offers isolated recovery for an expired saved %s CLI login", async (provider) => {
+    const app = await loadPluginApp(() => import("./app"));
+    const data = fixture({ ...ready, status: "error", error: "The CLI session expired or its refresh token was replaced. Sign in again." });
+    const section = { ...data.swap[0], id: provider, label: provider === "claude" ? "Claude" : "Codex" };
+    const loginStart = vi.fn(async () => ({
+      id: "cli-recovery", provider, targetAccount: "test-account", status: "waiting",
+      url: "https://example.com/sign-in", needsCode: provider === "claude",
+      userCode: provider === "codex" ? "ABCD-1234" : null,
+      expiresAt: now + 60_000, error: null, account: null,
+    }));
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, {
+      rpc: { overview: () => ({ ...data, swap: [section] }), loginStart },
+    });
+    fireEvent.click(await slot.findByRole("tab", { name: new RegExp(section.label) }));
+    fireEvent.click(await slot.findByRole("button", { name: "Log in again for test-account" }));
+    await waitFor(() => expect(loginStart).toHaveBeenCalledWith({ provider, name: "test-account" }));
+    expect(await slot.findByRole("link", { name: "Open sign-in page" })).toBeTruthy();
+    expect(slot.queryByText(/refresh token was replaced/)).toBeNull();
+    slot.lifecycle.unmount();
+  });
+
   it("offers account-specific re-login instead of duplicate expired-login errors", async () => {
     const app = await loadPluginApp(() => import("./app"));
     const loginStart = vi.fn(async () => ({
