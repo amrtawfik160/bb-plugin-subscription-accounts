@@ -69,6 +69,30 @@ const ready: AccountUsage = {
 };
 
 describe("subscription usage page", () => {
+  it.each(["claude", "codex"] as const)("offers Add %s account separately from saved-account recovery", async (provider) => {
+    const app = await loadPluginApp(() => import("./app"));
+    const data = fixture(ready);
+    const label = provider === "claude" ? "Claude" : "Codex";
+    const loginStart = vi.fn(async () => ({
+      id: "add-cli", provider, targetAccount: null, status: "waiting",
+      url: "https://example.com/consent", needsCode: provider === "claude",
+      userCode: provider === "codex" ? "ABCD-1234" : null,
+      expiresAt: now + 60_000, error: null, account: null,
+    }));
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, {
+      rpc: { overview: () => ({ ...data, swap: [{ ...data.swap[0], id: provider, label }] }), loginStart },
+    });
+    fireEvent.click(await slot.findByRole("tab", { name: new RegExp(label) }));
+    expect(slot.getByRole("button", { name: "Log in again for test-account" })).toBeTruthy();
+    fireEvent.click(slot.getByRole("button", { name: `Add ${label} account` }));
+    await waitFor(() => expect(loginStart).toHaveBeenCalledWith({ provider }));
+    expect(await slot.findByRole("link", { name: "Open sign-in page" })).toBeTruthy();
+    expect(slot.getByText(/the account you want to add/)).toBeTruthy();
+    expect(slot.getByRole("button", { name: "Cancel" })).toBeTruthy();
+    if (provider === "codex") expect(slot.getByText("ABCD-1234")).toBeTruthy();
+    slot.lifecycle.unmount();
+  });
+
   it.each(["claude", "codex"] as const)("offers isolated recovery for an expired saved %s CLI login", async (provider) => {
     const app = await loadPluginApp(() => import("./app"));
     const data = fixture({ ...ready, status: "error", error: "The CLI session expired or its refresh token was replaced. Sign in again." });
