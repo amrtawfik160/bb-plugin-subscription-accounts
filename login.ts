@@ -100,7 +100,15 @@ export class LoginSession {
     const command = [binaryPath, ...this.spec.args].map(quote).join(" ");
     const child = spawn("script", ["-qfc", command, "/dev/null"], {
       cwd: this.home,
-      env: { ...process.env, ...this.spec.env, HOME: this.home, TERM: "xterm-256color" },
+      env: {
+        ...process.env,
+        ...this.spec.env,
+        HOME: this.home,
+        XDG_CONFIG_HOME: path.join(this.home, ".config"),
+        CLAUDE_CONFIG_DIR: path.join(this.home, ".claude"),
+        CODEX_HOME: path.join(this.home, ".codex"),
+        TERM: "xterm-256color",
+      },
       stdio: ["pipe", "pipe", "pipe"],
       detached: true,
     });

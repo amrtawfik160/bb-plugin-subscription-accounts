@@ -63,6 +63,7 @@ import {
   type PoolProviderId,
   SWAP_IDS,
   SWAP_PROVIDERS,
+  CLI_LOGIN_SPECS,
   type SwapProvider,
   type SwapProviderId,
   type LocalLogin,
@@ -745,17 +746,18 @@ export default async function plugin(bb: BbPluginApi) {
   async function startLogin(provider: z.infer<typeof anyProviderSchema>, name?: string): Promise<LoginState> {
     return serialized(async () => {
       if (swapLogin?.active) throw new Error("Finish or cancel the current sign-in first.");
-      if (isSwapId(provider)) {
-        const spec = SWAP_PROVIDERS[provider];
+      if (isSwapId(provider) || name !== undefined) {
+        const fileLogin = fileLoginFor(provider);
+        const spec = isSwapId(provider) ? SWAP_PROVIDERS[provider].login : CLI_LOGIN_SPECS[provider];
         const expected = name === undefined ? null : { ...requireAccount(await loadPool(provider), name) };
-        const binary = await findBinary(spec.login.binary);
-        if (!binary) throw new Error(`${spec.login.binary} is not installed on this machine.`);
+        const binary = await findBinary(spec.binary);
+        if (!binary) throw new Error(`${spec.binary} is not installed on this machine.`);
         const home = path.join(stagingRoot(), `${provider}-${Date.now()}`);
         const session = new LoginSession(
           provider,
-          spec.login,
+          spec,
           home,
-          spec.tokenPath,
+          fileLogin.tokenPath,
           () => {
             if (swapLogin === session) {
               login = { ...session.state };
@@ -769,9 +771,13 @@ export default async function plugin(bb: BbPluginApi) {
             const ensureActive = () => {
               if (!session.active) cancelled();
             };
-            const body = await fs.readFile(tokenFile, "utf8");
+            const raw = await fs.readFile(tokenFile, "utf8");
+            const stagedProfilePath = provider === "claude" ? ".claude/.claude.json" : fileLogin.profilePath;
+            const profile = stagedProfilePath
+              ? await readLoginFile(path.join(sessionHome, stagedProfilePath)) : null;
+            const body = fileLogin.capture(raw, profile);
+            if (!body) throw new Error("Sign-in did not save a usable subscription login. Try again.");
             ensureActive();
-            const fileLogin = fileLoginFor(spec.id);
             if (!expected) {
               return addAccount(fileLogin, undefined, body, {
                 makeActive: true,
@@ -783,7 +789,7 @@ export default async function plugin(bb: BbPluginApi) {
               });
             }
             const identity = fileLogin.identify(body);
-            const email = identity.email ?? await whoami(spec, sessionHome);
+            const email = identity.email ?? (isSwapId(provider) ? await whoami(SWAP_PROVIDERS[provider], sessionHome) : null);
             ensureActive();
             const saved = await mutate(provider, async (state) => {
               const meta = requireAccount(state, expected.name);
@@ -791,18 +797,26 @@ export default async function plugin(bb: BbPluginApi) {
               if (meta.addedAt !== expected.addedAt || meta.key !== expected.key) {
                 throw new Error("This saved account changed during sign-in. Try again.");
               }
-              const matchingEmail = provider !== "cursor" && meta.email && email && meta.email.toLowerCase() === email.toLowerCase();
+              const matchingEmail = provider !== "cursor" && provider !== "codex" && meta.email && email && meta.email.toLowerCase() === email.toLowerCase();
               if (identity.key !== meta.key && !matchingEmail) {
                 throw new Error(`Sign in with ${meta.email ?? meta.name}. Your saved login was kept.`);
               }
               const previous = readToken(provider, meta.name);
+              const liveProfile = await readProfile(fileLogin);
               const liveMatches = Boolean(
-                state.active === meta.name && previous && (await readLiveRaw(fileLogin)) === previous,
+                state.active === meta.name && previous &&
+                (await readLiveRaw(fileLogin)) === fileLogin.liveBytes(previous) &&
+                fileLogin.sameLive(meta, fileLogin.liveBytes(previous), liveProfile),
               );
               ensureActive();
               session.markCommitted();
               if (liveMatches) {
-                await replaceLoginFiles([{ path: loginFile(fileLogin), before: previous!, after: body }]);
+                const files = [{ path: loginFile(fileLogin), before: fileLogin.liveBytes(previous!), after: fileLogin.liveBytes(body) }];
+                const patched = fileLogin.profileBytes(liveProfile, body);
+                if (fileLogin.profilePath && patched !== null) {
+                  files.unshift({ path: path.join(os.homedir(), fileLogin.profilePath), before: liveProfile, after: patched });
+                }
+                await replaceLoginFiles(files);
               }
               writeToken(provider, meta.name, body);
               meta.key = identity.key;
@@ -829,7 +843,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function submitLogin(code: string): Promise<LoginState> {
     if (!login) throw new Error("No sign-in in progress. Start again.");
-    if (login.provider === "claude") {
+    if (login.provider === "claude" && !swapLogin) {
       if (!claudeSessionId) throw new Error("This sign-in expired. Start again.");
       updateLogin({ status: "verifying" });
       try {

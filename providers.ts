@@ -153,6 +153,33 @@ export const SWAP_PROVIDERS: Record<SwapProviderId, SwapProvider> = {
 export const SWAP_IDS = Object.keys(SWAP_PROVIDERS) as SwapProviderId[];
 export const POOL_IDS: PoolProviderId[] = ["claude", "codex"];
 
+export const CLI_LOGIN_SPECS: Record<PoolProviderId, LoginSpec> = {
+  claude: {
+    binary: "claude",
+    args: ["auth", "login", "--claudeai"],
+    env: {
+      BROWSER: "/bin/true",
+      ANTHROPIC_API_KEY: "",
+      ANTHROPIC_AUTH_TOKEN: "",
+      CLAUDE_CODE_OAUTH_TOKEN: "",
+      CLAUDE_CODE_OAUTH_REFRESH_TOKEN: "",
+      CLAUDE_CODE_HOST_CREDS_FILE: "",
+    },
+    needsCode: true,
+    urlPattern: /https:\/\/(?:claude\.ai|console\.anthropic\.com|platform\.claude\.com)\/oauth\/authorize\S+/,
+    windowMs: 10 * 60_000,
+  },
+  codex: {
+    binary: "codex",
+    args: ["login", "--device-auth", "-c", 'cli_auth_credentials_store="file"'],
+    env: { OPENAI_API_KEY: "", CODEX_API_KEY: "", CODEX_ACCESS_TOKEN: "" },
+    needsCode: false,
+    urlPattern: /https:\/\/auth\.openai\.com\/codex\/device\S*/,
+    userCodePattern: /\b([A-Z0-9]{4}-[A-Z0-9]{4})\b/,
+    windowMs: 15 * 60_000,
+  },
+};
+
 export function isSwapId(id: string): id is SwapProviderId {
   return id in SWAP_PROVIDERS;
 }

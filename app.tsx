@@ -780,9 +780,9 @@ function SwapTab({ section, data, rpc, run }: { section: SwapSection; data: Over
                     now={now}
                     name={account.name}
                     onRefresh={() => run(() => rpc.call("usageRefresh", target(account.name)))}
-                    actions={section.id !== "claude" && section.id !== "codex" ? (
+                    actions={(
                       <SignIn provider={section.id} label={section.label} account={account} login={data.login} rpc={rpc} run={run} disabled={!section.installed} />
-                    ) : undefined}
+                    )}
                   />
                 </div>
               </li>
