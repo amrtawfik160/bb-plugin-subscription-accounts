@@ -700,6 +700,28 @@ describe("subscription usage page", () => {
     slot.lifecycle.unmount();
   });
 
+  it.each(["failed refresh", "old reading", "reset passed"])("shows historical quotas without a current allowance (%s)", async (cause) => {
+    const app = await loadPluginApp(() => import("./app"));
+    const usage: AccountUsage = {
+      ...ready,
+      status: cause === "failed refresh" ? "error" : "ready",
+      error: cause === "failed refresh" ? "The CLI session expired. Sign in again." : null,
+      fetchedAt: cause === "old reading" ? now - 9 * 3600000 : now,
+      metrics: [{ label: "5-hour window", used: 11, remaining: 89, limit: 100, unit: "percent", resetAt: cause === "reset passed" ? now - 60000 : now + 3600000, windowMs: 5 * 3600000 }],
+    };
+    const slot = renderSlot(app.navPanels[0], { subPath: "" }, { rpc: { overview: () => fixture(usage) } });
+    expect(await slot.findByText("Current allowance unknown")).toBeTruthy();
+    expect(slot.getByText("11% used at last reading")).toBeTruthy();
+    expect(slot.queryByText("89% left")).toBeNull();
+    expect(slot.queryByText(/Limit in ~/)).toBeNull();
+    expect(slot.getByRole("progressbar").getAttribute("aria-valuetext")).not.toContain("remaining");
+    fireEvent.click(slot.getByRole("tab", { name: "All" }));
+    const quotas = within(slot.getByRole("region", { name: "Antigravity quotas" }));
+    expect(quotas.getByText("Current allowance unknown")).toBeTruthy();
+    expect(quotas.queryByText("89% left")).toBeNull();
+    slot.lifecycle.unmount();
+  });
+
   it("shows loading and unavailable quota without inventing zero usage", async () => {
     const app = await loadPluginApp(() => import("./app"));
     const slot = renderSlot(
