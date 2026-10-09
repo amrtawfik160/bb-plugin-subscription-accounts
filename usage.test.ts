@@ -296,7 +296,7 @@ describe("usage requests", () => {
         return Response.json({ groups: [{ buckets: [{ bucketId: "gemini-5h", remainingFraction: 0.6 }] }] });
       return Response.json({});
     });
-    const config = vi.fn(async () => ({ clientId: "test-client-id", clientSecret: "test-client-secret" }));
+    const config = vi.fn(async () => [{ clientId: "test-client-id", clientSecret: "test-client-secret" }]);
     const result = await createUsageClient(fetcher, undefined, config)(
       "antigravity",
       JSON.stringify({ token: { refresh_token: "test-refresh" } }),
@@ -314,7 +314,7 @@ describe("usage requests", () => {
         JSON.stringify({ token: { refresh_token: "test-refresh" } }),
         vi.fn(),
       ),
-    ).rejects.toThrow("configure its OAuth client");
+    ).rejects.toThrow("agy CLI was not found");
     expect(fetcher).not.toHaveBeenCalled();
   });
   it("refreshes Grok once, saves rotated credentials, and returns only usage", async () => {

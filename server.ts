@@ -26,6 +26,7 @@ import {
   stackLoginFromPooler,
   type FileLogin,
 } from "./direct-login.js";
+import { antigravityClients } from "./antigravity-client.js";
 import { LoginSession, type LoginState, findBinary, stripAnsi } from "./login.js";
 import { machineCredentials, readLoginFile, replaceLoginFiles } from "./machine-login.js";
 import {
@@ -236,6 +237,7 @@ export default async function plugin(bb: BbPluginApi) {
   for (const providerId of ["claude-code", "codex"] as const) {
     bb.providers.experimental_contributeEnv(providerId, () => directLoginEnv(providerId));
   }
+  const agyClients = antigravityClients(() => findBinary(SWAP_PROVIDERS.antigravity.login.binary));
   const usage = new UsageCache(() => changed());
   const usageController = new AbortController();
   const fetchUsage = createUsageClient(
@@ -243,12 +245,11 @@ export default async function plugin(bb: BbPluginApi) {
     usageController.signal,
     async () => {
       const values = await settings.get();
-      return values.antigravityOAuthClientId && values.antigravityOAuthClientSecret
-        ? {
-            clientId: values.antigravityOAuthClientId,
-            clientSecret: values.antigravityOAuthClientSecret,
-          }
-        : null;
+      const configured =
+        values.antigravityOAuthClientId && values.antigravityOAuthClientSecret
+          ? [{ clientId: values.antigravityOAuthClientId, clientSecret: values.antigravityOAuthClientSecret }]
+          : [];
+      return [...configured, ...(await agyClients())];
     },
     () => pricing.current(),
   );
@@ -273,7 +274,7 @@ export default async function plugin(bb: BbPluginApi) {
       type: "string",
       label: "Antigravity OAuth client ID",
       secret: true,
-      description: "The CLI's OAuth client. Required for refreshing expired Antigravity usage access.",
+      description: "Optional. Read from the installed agy CLI when empty; set it only if that fails.",
     },
     antigravityOAuthClientSecret: {
       type: "string",

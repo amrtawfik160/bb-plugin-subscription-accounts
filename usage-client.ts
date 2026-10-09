@@ -2,6 +2,7 @@
 // Keep provider responses and credential-bearing errors on the server.
 import { jwtClaims, type PoolProviderId, type SwapProviderId } from "./providers.js";
 import { fetchCursorHistory } from "./cursor-history.js";
+import type { GoogleClient } from "./antigravity-client.js";
 import type { ModelPricing } from "./pricing.js";
 import { emptyHistory } from "./history.js";
 import {
@@ -256,6 +257,10 @@ export function createLocalUsageClient(
   };
 }
 
+function sameClient(a: GoogleClient, b: GoogleClient | null): boolean {
+  return Boolean(b && a.clientId === b.clientId && a.clientSecret === b.clientSecret);
+}
+
 // OpenUsage's CursorSession selects the second subject component when present.
 function cursorUserId(access: string): string | null {
   const subject = textValue(jwtClaims(access)?.sub);
@@ -267,13 +272,13 @@ function cursorUserId(access: string): string | null {
 export function createUsageClient(
   fetcher: typeof fetch = fetch,
   signal?: AbortSignal,
-  googleOAuthClient: () => Promise<{
-    clientId: string;
-    clientSecret: string;
-  } | null> = async () => null,
+  googleOAuthClients: () => Promise<GoogleClient[]> = async () => [],
   pricing?: () => Promise<ModelPricing>,
 ) {
   const request = createRequest(fetcher, signal);
+  const respond = createResponseRequest(fetcher, signal);
+  // The client that last renewed an Antigravity login; tried first next time.
+  let googleClient: GoogleClient | null = null;
   const bearer = (token: string): Record<string, string> => ({
     Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
@@ -316,33 +321,22 @@ export function createUsageClient(
             refresh_token: refreshToken,
           }),
         });
+      } else if (provider === "antigravity") {
+        result = await refreshGoogle(refreshToken);
       } else {
-        const google = provider === "antigravity" ? await googleOAuthClient() : null;
-        if (provider === "antigravity" && !google)
-          throw new UsageError(
-            "Antigravity login expired. Refresh the CLI login or configure its OAuth client in plugin settings.",
-          );
         const params = new URLSearchParams({
           grant_type: "refresh_token",
           refresh_token: refreshToken,
           client_id:
-            provider === "antigravity"
-              ? google!.clientId
-              : (textValue(credentials.oidc_client_id) ??
-                entryPair?.[0].split("::").pop() ??
-                "b1a00492-073a-47ea-816f-4c329264a828"),
+            textValue(credentials.oidc_client_id) ??
+            entryPair?.[0].split("::").pop() ??
+            "b1a00492-073a-47ea-816f-4c329264a828",
         });
-        if (provider === "antigravity") params.set("client_secret", google!.clientSecret);
-        result = await request(
-          provider === "antigravity"
-            ? "https://oauth2.googleapis.com/token"
-            : "https://auth.x.ai/oauth2/token",
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            body: params.toString(),
-          },
-        );
+        result = await request("https://auth.x.ai/oauth2/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: params.toString(),
+        });
       }
       access = textValue(result.access_token);
       if (!access) throw new UsageError("The provider could not refresh this login. Sign in again.");
@@ -351,10 +345,51 @@ export function createUsageClient(
       if (textValue(result.id_token)) credentials.id_token = result.id_token;
       const expires = number(result.expires_in);
       if (expires !== null) {
-        if (provider === "antigravity") credentials.expiry_date = Date.now() + expires * 1000;
+        // agy reads Go's oauth2 "expiry" (RFC 3339), not a millisecond field.
+        if (provider === "antigravity") credentials.expiry = new Date(Date.now() + expires * 1000).toISOString();
         if (provider === "grok") credentials.expires_at = new Date(Date.now() + expires * 1000).toISOString();
       }
       await save(JSON.stringify(file));
+    }
+
+    // Google answers invalid_client for a wrong client before it checks the
+    // refresh token, so each candidate pair can be tried safely in turn.
+    async function refreshGoogle(refreshToken: string): Promise<Json> {
+      const audience = textValue(jwtClaims(file.id_token)?.aud);
+      const candidates = [...(await googleOAuthClients())].sort(
+        (a, b) =>
+          Number(sameClient(b, googleClient)) - Number(sameClient(a, googleClient)) ||
+          Number(b.clientId === audience) - Number(a.clientId === audience),
+      );
+      if (candidates.length === 0)
+        throw new UsageError(
+          "Could not renew this Antigravity login: the agy CLI was not found on this machine. Install agy, then refresh.",
+        );
+      for (const client of candidates) {
+        const response = await respond("https://oauth2.googleapis.com/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            grant_type: "refresh_token",
+            refresh_token: refreshToken,
+            client_id: client.clientId,
+            client_secret: client.clientSecret,
+          }).toString(),
+        });
+        const body = object(await response.json().catch(() => null));
+        if (response.ok) {
+          googleClient = client;
+          return body;
+        }
+        const code = textValue(body.error);
+        if (code === "invalid_client" || code === "unauthorized_client") continue;
+        if (code === "invalid_grant")
+          throw new UsageError("Google signed this Antigravity account out. Sign in again.");
+        throw new UsageError(`Antigravity login renewal failed (HTTP ${response.status}). Refresh to try again.`);
+      }
+      throw new UsageError(
+        "Could not renew this Antigravity login with the installed agy CLI. Update agy, then refresh.",
+      );
     }
 
     async function load(): Promise<UsageData> {
