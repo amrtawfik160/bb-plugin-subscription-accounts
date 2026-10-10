@@ -7,6 +7,8 @@ const claude = JSON.stringify({
     accessToken: "old-access",
     refreshToken: "refresh",
     expiresAt: Date.now() + 3600000,
+    subscriptionType: "max",
+    rateLimitTier: "default_claude_max_20x",
   },
 });
 const codex = JSON.stringify({
@@ -81,6 +83,7 @@ describe("OpenUsage local quota fetching", () => {
       { reload, save },
     );
     expect(result.metrics[0].used).toBe(12);
+    expect(result.plan).toBe("Max 20x");
     expect(fetcher).toHaveBeenCalledTimes(2);
     expect(save).not.toHaveBeenCalled();
   });

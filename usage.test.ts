@@ -87,6 +87,13 @@ describe("provider quota normalization", () => {
     expect(mapCursor({ planUsage: { limit: 2000 } }).metrics).toEqual([]);
   });
 
+  it("does not count Cursor bonus usage against the plan limit", () => {
+    const result = mapCursor({
+      planUsage: { limit: 40000, totalSpend: 310075, includedSpend: 30000, bonusSpend: 270075 },
+    });
+    expect(result.metrics).toMatchObject([{ label: "Plan usage", used: 300, limit: 400, remaining: 100, unit: "usd" }]);
+  });
+
   it("reports Cursor model-group remaining from pool percentages and omits missing pools", () => {
     const result = mapCursor({
       planUsage: { autoPercentUsed: 40, apiPercentUsed: 25 },
@@ -192,6 +199,32 @@ describe("provider quota normalization", () => {
       { used: 12.34, limit: 50, unit: "usd" },
     ]);
     expect(mapClaude({ five_hour: {} }).metrics).toEqual([]);
+  });
+
+  it("reports Claude per-model weekly limits from the limits list once", () => {
+    const scoped = (name: string, percent: number) => ({
+      kind: "weekly_scoped",
+      percent,
+      resets_at: "2026-10-15T00:00:00Z",
+      scope: { model: { id: null, display_name: name } },
+    });
+    expect(
+      mapClaude({
+        seven_day: { utilization: 42 },
+        seven_day_opus: { utilization: 10 },
+        limits: [{ kind: "weekly_all", percent: 42, scope: null }, scoped("Fable", 4), scoped("Opus", 10)],
+      }).metrics,
+    ).toMatchObject([
+      { label: "Weekly window", used: 42 },
+      { label: "Opus · weekly", used: 10 },
+      {
+        label: "Fable · weekly",
+        used: 4,
+        remaining: 96,
+        resetAt: Date.parse("2026-10-15T00:00:00Z"),
+        scope: { kind: "group", group: "Fable" },
+      },
+    ]);
   });
 
   it("classifies Codex windows by duration when only a weekly primary window exists", () => {
@@ -303,8 +336,24 @@ describe("usage requests", () => {
       vi.fn(),
     );
     expect(result.metrics).toMatchObject([{ used: 40, remaining: 60 }]);
+    expect(result.modelQuotas).toBeUndefined();
+    expect(fetcher.mock.calls.some(([url]) => String(url).includes("fetchAvailableModels"))).toBe(false);
     expect(config).toHaveBeenCalledOnce();
     expect(JSON.stringify(result)).not.toMatch(/test-client|test-refresh|new-access/);
+  });
+  it("lists Antigravity models only when the shared limits are not reported", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (url) =>
+      String(url).includes("fetchAvailableModels")
+        ? Response.json({ models: { "gemini-pro": { displayName: "Gemini Pro", quotaInfo: { remainingFraction: 0.25 } } } })
+        : Response.json({}),
+    );
+    const result = await createUsageClient(fetcher)(
+      "antigravity",
+      JSON.stringify({ token: { access_token: "access", refresh_token: "test-refresh" } }),
+      vi.fn(),
+    );
+    expect(result.metrics).toMatchObject([{ label: "Gemini · 5 hours", used: 75, derivedFromModels: true }]);
+    expect(result.modelQuotas).toMatchObject([{ label: "Gemini Pro", remaining: 25 }]);
   });
   it("does not attempt Google refresh without runtime client configuration", async () => {
     const fetcher = vi.fn<typeof fetch>();
