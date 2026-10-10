@@ -238,7 +238,11 @@ export function mapCursor(
   };
   const limit = number(plan.limit),
     remaining = number(plan.remaining);
-  const used = number(plan.totalSpend) ?? (limit !== null && remaining !== null ? limit - remaining : null);
+  // totalSpend also counts free bonus usage, which never draws on the plan limit.
+  const used =
+    number(plan.includedSpend) ??
+    number(plan.totalSpend) ??
+    (limit !== null && remaining !== null ? limit - remaining : null);
   const request = object(object(requests)["gpt-4"]);
   if (root.enabled !== false) {
     if (limit !== null && limit > 0 && used !== null)
@@ -349,6 +353,16 @@ export function mapClaude(value: unknown): UsageData {
     const window = object(root[key]);
     const row = metric(label, number(window.utilization), 100, "percent", timestamp(window.resets_at));
     if (row) metrics.push({ ...row, windowMs: (key === "five_hour" ? 5 : 168) * 3_600_000, ...(key.startsWith("seven_day_") ? { scope: { kind: "group", group: model } satisfies NonNullable<UsageMetric["scope"]> } : {}) });
+  }
+  // Per-model weekly limits moved from seven_day_<model> keys into this list.
+  for (const raw of Array.isArray(root.limits) ? root.limits : []) {
+    const limit = object(raw);
+    const model = textValue(object(object(limit.scope).model).display_name);
+    if (limit.kind !== "weekly_scoped" || !model) continue;
+    const label = `${model} · weekly`;
+    if (metrics.some((row) => row.label.toLowerCase() === label.toLowerCase())) continue;
+    const row = metric(label, number(limit.percent), 100, "percent", timestamp(limit.resets_at));
+    if (row) metrics.push({ ...row, windowMs: 168 * 3_600_000, scope: { kind: "group", group: model } });
   }
   const extra = object(root.extra_usage);
   if (extra.is_enabled === true) {

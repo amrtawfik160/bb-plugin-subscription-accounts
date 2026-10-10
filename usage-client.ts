@@ -1,6 +1,6 @@
 // Provider request shapes researched from robinebers/openusage (MIT).
 // Keep provider responses and credential-bearing errors on the server.
-import { jwtClaims, type PoolProviderId, type SwapProviderId } from "./providers.js";
+import { jwtClaims, readClaudeLocal, type PoolProviderId, type SwapProviderId } from "./providers.js";
 import { fetchCursorHistory } from "./cursor-history.js";
 import type { GoogleClient } from "./antigravity-client.js";
 import type { ModelPricing } from "./pricing.js";
@@ -252,7 +252,7 @@ export function createLocalUsageClient(
       throw new UsageError("The usage service returned an invalid response. Refresh to try again.");
     }
     return provider === "claude"
-      ? mapClaude(result)
+      ? { ...mapClaude(result), plan: readClaudeLocal(JSON.stringify(file), null)?.plan ?? null }
       : mapCodex(result, Date.now(), response.headers);
   };
 }
@@ -495,15 +495,16 @@ export function createUsageClient(
       } catch (cause) {
         if (cause instanceof HttpError && [401, 403].includes(cause.status)) throw cause;
       }
-      const hasSummary = Array.isArray(summary?.groups) || Array.isArray(object(summary?.response).groups);
+      // The four shared limits are the account's quota; list models only without them.
+      const shared = mapAntigravity(summary);
       const [models, plan] = await Promise.all([
-        hasSummary ? optional(cloud("fetchAvailableModels")) : cloud("fetchAvailableModels"),
+        shared.length ? null : cloud("fetchAvailableModels"),
         optional(cloud("loadCodeAssist")),
       ]);
       return {
         plan: textValue(object(plan?.paidTier).name ?? object(plan?.currentTier).name),
-        metrics: mapAntigravity(summary, models),
-        modelQuotas: mapAntigravityModelQuotas(models),
+        metrics: shared.length ? shared : mapAntigravity(null, models),
+        ...(shared.length ? {} : { modelQuotas: mapAntigravityModelQuotas(models) }),
       };
     }
 
