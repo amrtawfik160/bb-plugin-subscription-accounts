@@ -433,9 +433,9 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   async function activate(login: FileLogin, state: PoolState, name: string): Promise<void> {
+    await syncActive(login, state);
     const body = readToken(login.id, name);
     if (!body) throw new Error(`No saved login for "${name}". Add it again.`);
-    await syncActive(login, state);
     await writeLive(login, body);
     state.active = name;
     state.lastSwitchAt = Date.now();
@@ -999,6 +999,13 @@ export default async function plugin(bb: BbPluginApi) {
           if (!stored) throw new UsageError("No saved login. Add this account again.");
           const expectedCredentials = login.liveBytes(stored);
           return fetchLocalUsage(provider, expectedCredentials, {
+            reload: () => serialized(async () => {
+              const state = await loadPool(provider);
+              if (!state.accounts[name]) return null;
+              if (options.syncLive) await syncActive(login, state);
+              const current = readToken(provider, name);
+              return current ? login.liveBytes(current) : null;
+            }),
             save: async (updated, expected) =>
               serialized(async () => {
                 const current = readToken(provider, name);
@@ -1006,9 +1013,7 @@ export default async function plugin(bb: BbPluginApi) {
                 const state = await loadPool(provider);
                 const meta = state.accounts[name];
                 if (!meta) return false;
-                const profile = await readProfile(login);
-                const nextStored = login.refreshStored(meta, updated, profile);
-                if (!nextStored) return false;
+                const nextStored = login.withCredentials(current, updated);
                 if (state.active === name && (await readLiveRaw(login)) === login.liveBytes(current)) {
                   await writeLive(login, nextStored);
                 }

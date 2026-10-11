@@ -167,6 +167,11 @@ then retry. Codex windows are classified by their duration, including quota
 and credit values reported in response headers. Pool quotas read both legacy
 fields and the newer `limitWindows` records; unreported windows stay hidden.
 
+Claude token renewal preserves the identity stored with each saved login,
+including inactive accounts. Adding or selecting another account does not
+discard those renewed tokens. If a token was already lost or revoked, use
+**Log in again** once for that account.
+
 Refreshing a pooled account whose OAuth refresh failed can reconnect it from
 the current CLI login. The plugin verifies the provider account identity and
 fresh quotas before replacing that saved login, preserving its label and
