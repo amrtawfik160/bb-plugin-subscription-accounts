@@ -33,6 +33,7 @@ export interface FileLogin {
   profilePath: string | null;
   identify(stored: string): { key: string; email: string | null };
   liveBytes(stored: string): string;
+  withCredentials(stored: string, credentials: string): string;
   profileBytes(profile: string | null, stored: string): string | null;
   capture(live: string, profile: string | null): string | null;
   sameLive(
@@ -271,6 +272,10 @@ const claudeFile: FileLogin = {
   liveBytes(stored) {
     return parseEnvelope(stored)?.credentials ?? stored;
   },
+  withCredentials(stored, credentials) {
+    const envelope = parseEnvelope(stored);
+    return envelope ? JSON.stringify({ ...envelope, credentials }) : credentials;
+  },
   profileBytes(profile, stored) {
     const envelope = parseEnvelope(stored);
     if (!envelope) return null;
@@ -334,6 +339,7 @@ const codexFile: FileLogin = {
   profilePath: null,
   identify: identifyCodexStored,
   liveBytes: (stored) => stored,
+  withCredentials: (_stored, credentials) => credentials,
   profileBytes: () => null,
   capture(live) {
     return readCodexLocal(live) ? live : null;
@@ -354,6 +360,7 @@ function swapFile(provider: SwapProvider): FileLogin {
     profilePath: null,
     identify: (stored) => provider.identify(stored),
     liveBytes: (stored) => stored,
+    withCredentials: (_stored, credentials) => credentials,
     profileBytes: () => null,
     capture(live) {
       try {

@@ -783,6 +783,92 @@ describe("Claude and Codex direct switching", () => {
     };
   }
 
+  it.each(["other account", "no machine login", "switch during refresh"] as const)(
+    "preserves both Claude logins when renewing a saved token with %s",
+    async (scenario) => {
+      const harness = await host();
+      const fetcher = vi.mocked(fetch);
+      await writeClaude("access-a", "uuid-a", "a@example.com");
+      await harness.behavior.callRpc("saveCurrent", { provider: "claude" });
+      await writeClaude("access-b", "uuid-b", "b@example.com");
+      await harness.behavior.callRpc("saveCurrent", { provider: "claude" });
+      await harness.behavior.callRpc("use", { provider: "claude", name: scenario === "switch during refresh" ? "a" : "b" });
+      const file = path.join(home!, ".claude/.credentials.json");
+      const profile = path.join(home!, ".claude.json");
+      if (scenario === "no machine login") {
+        await fs.rm(file);
+        await fs.rm(profile);
+      }
+      let rotated = false;
+      fetcher.mockImplementation(async (input, init) => {
+        if (String(input).includes("/token")) {
+          expect(JSON.parse(String(init?.body)).refresh_token).toBe("refresh-access-a");
+          expect(rotated).toBe(false);
+          rotated = true;
+          if (scenario === "switch during refresh") {
+            await harness.behavior.callRpc("use", { provider: "claude", name: "b" });
+          }
+          return Response.json({ access_token: "renewed-a", refresh_token: "renewed-refresh-a", expires_in: 3600 });
+        }
+        const access = new Headers(init?.headers).get("Authorization");
+        return access === "Bearer access-a"
+          ? new Response(null, { status: 401 })
+          : Response.json({ five_hour: { utilization: access === "Bearer renewed-a" ? 12 : 34 } });
+      });
+
+      await harness.behavior.callRpc("usageRefresh", { provider: "claude", name: "a" });
+      const report = await harness.behavior.runCli(["quota", "claude", "--json"]);
+      expect(JSON.parse(report.stdout!).accounts).toMatchObject([
+        { account: "a", email: "a@example.com", status: "ready", limits: [{ used: 12 }] },
+        { account: "b", email: "b@example.com", status: "ready", limits: [{ used: 34 }] },
+      ]);
+      if (scenario === "no machine login") {
+        await expect(fs.readFile(file)).rejects.toMatchObject({ code: "ENOENT" });
+      } else {
+        expect(JSON.parse(await fs.readFile(file, "utf8")).claudeAiOauth.accessToken).toBe("access-b");
+      }
+      await harness.behavior.callRpc("use", { provider: "claude", name: "a" });
+      expect(JSON.parse(await fs.readFile(file, "utf8")).claudeAiOauth).toMatchObject({
+        accessToken: "renewed-a", refreshToken: "renewed-refresh-a",
+      });
+      expect(JSON.parse(await fs.readFile(profile, "utf8")).oauthAccount.accountUuid).toBe("uuid-a");
+      await harness.behavior.callRpc("usageRefresh", { provider: "claude", name: "a" });
+      await harness.behavior.callRpc("use", { provider: "claude", name: "b" });
+      expect(JSON.parse(await fs.readFile(file, "utf8")).claudeAiOauth.refreshToken).toBe("refresh-access-b");
+    },
+  );
+
+  it("keeps a CLI-renewed Claude token when selecting the active account again", async () => {
+    const harness = await host();
+    await writeClaude("old-a", "uuid-a", "a@example.com");
+    await harness.behavior.callRpc("saveCurrent", { provider: "claude" });
+    await writeClaude("renewed-a", "uuid-a", "a@example.com");
+    await harness.behavior.callRpc("use", { provider: "claude", name: "a" });
+    const credentials = JSON.parse(await fs.readFile(path.join(home!, ".claude/.credentials.json"), "utf8"));
+    expect(credentials.claudeAiOauth.accessToken).toBe("renewed-a");
+  });
+
+  it("reloads the saved account after the CLI renews its token during a usage request", async () => {
+    const harness = await host();
+    await writeClaude("old-a", "uuid-a", "a@example.com");
+    await harness.behavior.callRpc("saveCurrent", { provider: "claude" });
+    const fetcher = vi.mocked(fetch);
+    fetcher.mockImplementation(async (input, init) => {
+      expect(String(input)).not.toContain("/token");
+      if (new Headers(init?.headers).get("Authorization") === "Bearer old-a") {
+        await writeClaude("renewed-a", "uuid-a", "a@example.com");
+        return new Response(null, { status: 401 });
+      }
+      return Response.json({ five_hour: { utilization: 12 } });
+    });
+    await harness.behavior.callRpc("usageRefresh", { provider: "claude", name: "a" });
+    const report = await harness.behavior.runCli(["quota", "claude", "--json"]);
+    expect(JSON.parse(report.stdout!).accounts).toMatchObject([
+      { account: "a", status: "ready", limits: [{ used: 12 }] },
+    ]);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
   it("switches the Claude login after a 5-hour limit and retries the turn", async () => {
     const threads = threadsFor(
       "claude-code",
