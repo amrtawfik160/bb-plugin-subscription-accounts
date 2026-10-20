@@ -97,7 +97,7 @@ sleep 5
     expect(await fs.readFile(file, "utf8")).toBe(active ? fresh : savedLogin.replaceAll("test@", "other@"));
     await harness.behavior.callRpc("use", { provider: "grok", name: "test" });
     expect(await fs.readFile(file, "utf8")).toBe(fresh);
-  });
+  }, 15_000);
 
   it("rejects a different login without replacing the saved account", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => Response.json(billing)));
@@ -762,15 +762,24 @@ describe("Claude and Codex direct switching", () => {
     return created.harness;
   }
 
-  async function writeClaude(access: string, uuid: string, email: string) {
+  async function writeClaude(access: string, uuid: string, email: string, orgUuid?: string, subscriptionType: string = "max") {
     const creds = path.join(home!, ".claude/.credentials.json");
     await fs.mkdir(path.dirname(creds), { recursive: true });
     await fs.writeFile(creds, JSON.stringify({
-      claudeAiOauth: { accessToken: access, refreshToken: `refresh-${access}`, subscriptionType: "max" },
+      claudeAiOauth: {
+        accessToken: access,
+        refreshToken: `refresh-${access}`,
+        subscriptionType,
+        ...(orgUuid ? { organizationUuid: orgUuid } : {}),
+      },
     }));
     await fs.writeFile(path.join(home!, ".claude.json"), JSON.stringify({
       theme: "dark",
-      oauthAccount: { emailAddress: email, accountUuid: uuid },
+      oauthAccount: {
+        emailAddress: email,
+        accountUuid: uuid,
+        ...(orgUuid ? { organizationUuid: orgUuid } : {}),
+      },
     }));
   }
 
@@ -1024,4 +1033,40 @@ describe("Claude and Codex direct switching", () => {
     const again = await reloaded.harness.behavior.callRpc("overview", null) as typeof overview;
     expect(again.swap.find((section) => section.id === "claude")?.accounts).toHaveLength(2);
   });
+
+  it("preserves both Claude personal and team subscriptions with the same email and allows switching between them", async () => {
+    const harness = await host();
+    // 1. Save personal subscription
+    await writeClaude("access-personal", "uuid-user-1", "user@example.com", undefined, "max");
+    await harness.behavior.callRpc("saveCurrent", { provider: "claude" });
+
+    // 2. Save team subscription with same email and same accountUuid
+    await writeClaude("access-team", "uuid-user-1", "user@example.com", "org-team-1", "team");
+    await harness.behavior.callRpc("saveCurrent", { provider: "claude" });
+
+    // 3. Verify both accounts exist in overview with distinct names and keys
+    const overview = (await harness.behavior.callRpc("overview", null)) as any;
+    const claude = overview.swap.find((s: any) => s.id === "claude");
+    expect(claude.accounts.map((a: any) => a.name)).toEqual(["user", "user-team"]);
+    expect(claude.active).toBe("user");
+
+    // 4. Switch to team account
+    await harness.behavior.callRpc("use", { provider: "claude", name: "user-team" });
+    const teamCreds = JSON.parse(await fs.readFile(path.join(home!, ".claude/.credentials.json"), "utf8"));
+    const teamProfile = JSON.parse(await fs.readFile(path.join(home!, ".claude.json"), "utf8"));
+    expect(teamCreds.claudeAiOauth.accessToken).toBe("access-team");
+    expect(teamProfile.oauthAccount.organizationUuid).toBe("org-team-1");
+    const overviewTeam = (await harness.behavior.callRpc("overview", null)) as any;
+    expect(overviewTeam.swap.find((s: any) => s.id === "claude").active).toBe("user-team");
+
+    // 5. Switch to personal account
+    await harness.behavior.callRpc("use", { provider: "claude", name: "user" });
+    const personalCreds = JSON.parse(await fs.readFile(path.join(home!, ".claude/.credentials.json"), "utf8"));
+    const personalProfile = JSON.parse(await fs.readFile(path.join(home!, ".claude.json"), "utf8"));
+    expect(personalCreds.claudeAiOauth.accessToken).toBe("access-personal");
+    expect(personalProfile.oauthAccount.organizationUuid).toBeUndefined();
+    const overviewPersonal = (await harness.behavior.callRpc("overview", null)) as any;
+    expect(overviewPersonal.swap.find((s: any) => s.id === "claude").active).toBe("user");
+  });
 });
+

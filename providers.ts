@@ -195,6 +195,7 @@ export function swapProviderForThread(bbProviderId: string | null | undefined): 
 export interface LocalLogin {
   email: string | null;
   accountId: string | null;
+  organizationUuid?: string | null;
   /** Human plan name, e.g. "Max 20x" or "Pro". */
   plan: string | null;
 }
@@ -217,23 +218,32 @@ export function readClaudeLocal(credentials: string | null, profile: string | nu
   }
   if (!oauth || !str(oauth.refreshToken)) return null;
   let email: string | null = null;
-  try {
-    const account = (JSON.parse(profile ?? "{}") as { oauthAccount?: { emailAddress?: unknown } }).oauthAccount;
-    email = str(account?.emailAddress);
-  } catch {
-    // email stays unknown
-  }
-  const tier = str(oauth.rateLimitTier);
-  const multiplier = tier ? /(\d+)x\b/i.exec(tier)?.[1] : undefined;
-  const type = str(oauth.subscriptionType);
-  const plan = type ? `${titleCase(type)}${multiplier ? ` ${multiplier}x` : ""}` : null;
   let accountId: string | null = null;
+  let organizationUuid: string | null = null;
+  let profileBilling: string | null = null;
   try {
-    accountId = str(JSON.parse(profile ?? "{}").oauthAccount?.accountUuid);
+    const parsed = JSON.parse(profile ?? "{}");
+    const account = (parsed as { oauthAccount?: Record<string, unknown> }).oauthAccount;
+    email = str(account?.emailAddress);
+    accountId = str(account?.accountUuid);
+    organizationUuid = str(account?.organizationUuid);
+    profileBilling = str(account?.billingType);
   } catch {
     // A missing profile must not prevent usage from loading.
   }
-  return { email, plan, accountId };
+  if (!organizationUuid) {
+    organizationUuid = str(oauth.organizationUuid);
+  }
+  const tier = str(oauth.rateLimitTier);
+  const multiplier = tier ? /(\d+)x\b/i.exec(tier)?.[1] : undefined;
+  const subscriptionType = str(oauth.subscriptionType) ?? profileBilling;
+  const plan = subscriptionType ? `${titleCase(subscriptionType)}${multiplier ? ` ${multiplier}x` : ""}` : null;
+  return {
+    email,
+    plan,
+    accountId: accountId ?? organizationUuid,
+    ...(organizationUuid ? { organizationUuid } : {}),
+  };
 }
 
 /** `~/.codex/auth.json`: email and ChatGPT plan live in the id token. */

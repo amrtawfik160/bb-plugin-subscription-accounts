@@ -12,8 +12,10 @@ import {
   mapCodex,
   mapCursor,
   mapGrok,
+  HttpError,
   number,
   object,
+  parseRetryAfter,
   textValue,
   UsageError,
   type UsageData,
@@ -21,16 +23,6 @@ import {
 
 type Json = Record<string, unknown>;
 type Request = (url: string, init: RequestInit) => Promise<Json>;
-
-class HttpError extends UsageError {
-  constructor(readonly status: number) {
-    super(
-      status === 401 || status === 403
-        ? "Usage access expired or was denied. Sign in again, then refresh."
-        : `Usage request failed (HTTP ${status}). Refresh to try again.`,
-    );
-  }
-}
 
 function createResponseRequest(fetcher: typeof fetch, signal?: AbortSignal) {
   return async (url: string, init: RequestInit): Promise<Response> => {
@@ -53,7 +45,7 @@ function createRequest(fetcher: typeof fetch, signal?: AbortSignal): Request {
   const request = createResponseRequest(fetcher, signal);
   return async (url, init) => {
     const response = await request(url, init);
-    if (!response.ok) throw new HttpError(response.status);
+    if (!response.ok) throw new HttpError(response.status, parseRetryAfter(response));
     try {
       return object(await response.json());
     } catch {
@@ -207,8 +199,24 @@ export function createLocalUsageClient(
         file = parse(current);
       } else await refresh();
       response = await attempt();
+    } else if (response.status === 429 && provider === "claude") {
+      const current = await store.reload?.();
+      if (current && current !== body) {
+        await response.body?.cancel();
+        body = current;
+        file = parse(current);
+        response = await attempt();
+      } else if (store.save) {
+        await response.body?.cancel();
+        try {
+          await refresh();
+          response = await attempt();
+        } catch {
+          // If refresh fails, fall through to reporting the rate limit error
+        }
+      }
     }
-    if (!response.ok) throw new HttpError(response.status);
+    if (!response.ok) throw new HttpError(response.status, parseRetryAfter(response));
     if (store.expectedAccountId) {
       if (provider === "claude") {
         const profile = await request(
@@ -221,7 +229,7 @@ export function createLocalUsageClient(
             },
           },
         );
-        if (!profile.ok) throw new HttpError(profile.status);
+        if (!profile.ok) throw new HttpError(profile.status, parseRetryAfter(profile));
         const identity = object(await profile.json().catch(() => null));
         if (
           textValue(object(identity.account).uuid) !== store.expectedAccountId

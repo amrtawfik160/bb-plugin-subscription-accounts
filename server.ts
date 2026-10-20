@@ -476,9 +476,10 @@ export default async function plugin(bb: BbPluginApi) {
     options.beforeCommit?.();
     return mutate(login.id, async (state) => {
       const clash = Object.values(state.accounts).find((meta) => meta.key === identity.key);
+      const suffix = identity.isTeam ? "team" : undefined;
       const name = rawName?.trim()
         ? validateName(rawName)
-        : (clash?.name ?? nameFromEmail(email, state.order));
+        : (clash?.name ?? nameFromEmail(email, state.order, suffix));
       if (clash && clash.name !== name && !options.force) {
         throw new Error(`${email ?? "That login"} is already saved as "${clash.name}".`);
       }
@@ -774,7 +775,9 @@ export default async function plugin(bb: BbPluginApi) {
           const raw = await fs.readFile(tokenFile, "utf8");
           const stagedProfilePath = provider === "claude" ? ".claude/.claude.json" : fileLogin.profilePath;
           const profile = stagedProfilePath
-            ? await readLoginFile(path.join(sessionHome, stagedProfilePath)) : null;
+            ? (await readLoginFile(path.join(sessionHome, stagedProfilePath))) ??
+              (provider === "claude" ? await readLoginFile(path.join(sessionHome, ".claude.json")) : null)
+            : null;
           if ((provider === "claude" && !readClaudeLocal(raw, profile)?.accountId) ||
               (provider === "codex" && !readCodexLocal(raw)?.accountId)) {
             throw new Error("Sign-in did not save a verified account identity. Try again.");
@@ -801,7 +804,7 @@ export default async function plugin(bb: BbPluginApi) {
             if (meta.addedAt !== expected.addedAt || meta.key !== expected.key) {
               throw new Error("This saved account changed during sign-in. Try again.");
             }
-            const matchingEmail = provider !== "cursor" && provider !== "codex" && meta.email && email && meta.email.toLowerCase() === email.toLowerCase();
+            const matchingEmail = provider !== "cursor" && provider !== "codex" && provider !== "claude" && meta.email && email && meta.email.toLowerCase() === email.toLowerCase();
             if (identity.key !== meta.key && !matchingEmail) {
               throw new Error(`Sign in with ${meta.email ?? meta.name}. Your saved login was kept.`);
             }
@@ -873,7 +876,8 @@ export default async function plugin(bb: BbPluginApi) {
     identity: { key: string; email: string | null },
   ): boolean {
     if (row.key === identity.key) return true;
-    return provider === "claude" && Boolean(
+    return Boolean(
+      (row.key === row.email || identity.key === identity.email) &&
       identity.email && row.email && identity.email.toLowerCase() === row.email.toLowerCase(),
     );
   }
@@ -927,7 +931,7 @@ export default async function plugin(bb: BbPluginApi) {
           const live = await readLiveRaw(login);
           const profile = await readProfile(login);
           const captured = live ? login.capture(live, profile) : null;
-          let liveIdentity: { key: string; email: string | null } | null = null;
+          let liveIdentity: { key: string; email: string | null; isTeam?: boolean } | null = null;
           if (captured) {
             try {
               liveIdentity = login.identify(captured);
@@ -938,7 +942,7 @@ export default async function plugin(bb: BbPluginApi) {
           if (captured && liveIdentity) {
             const identity = liveIdentity;
             if (!rows.some((row) => sameStackIdentity(provider, row, identity))) {
-              const name = nameFromEmail(identity.email, taken);
+              const name = nameFromEmail(identity.email, taken, identity.isTeam ? "team" : undefined);
               rows.unshift({
                 name,
                 key: identity.key,
@@ -1253,13 +1257,26 @@ export default async function plugin(bb: BbPluginApi) {
         } catch {
           throw new Error("The Claude profile is invalid. Repair it before switching accounts.");
         }
+        const existingOauth = (existing.oauthAccount && typeof existing.oauthAccount === "object" && !Array.isArray(existing.oauthAccount))
+          ? existing.oauthAccount as Record<string, unknown>
+          : {};
+        const oauthAccount: Record<string, unknown> = {
+          ...existingOauth,
+          accountUuid: account.accountUuid ?? null,
+          emailAddress: account.email,
+        };
+        const orgUuid = "organizationUuid" in account && typeof (account as Record<string, unknown>).organizationUuid === "string"
+          ? (account as Record<string, unknown>).organizationUuid as string
+          : null;
+        if (orgUuid) {
+          oauthAccount.organizationUuid = orgUuid;
+        } else {
+          delete oauthAccount.organizationUuid;
+        }
         files.unshift({
           path: profilePath,
           before: profile,
-          after: JSON.stringify({ ...existing, oauthAccount: {
-            accountUuid: account.accountUuid ?? null,
-            emailAddress: account.email,
-          } }),
+          after: JSON.stringify({ ...existing, oauthAccount }),
         });
       }
       await replaceLoginFiles(files);

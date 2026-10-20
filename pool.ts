@@ -101,15 +101,20 @@ export function formatDuration(ms: number): string {
 }
 
 /** "Jane.Doe+ai@gmail.com" → "jane-doe-ai", unique within `taken`. */
-export function nameFromEmail(email: string | null, taken: Iterable<string>): string {
+export function nameFromEmail(
+  email: string | null,
+  taken: Iterable<string>,
+  suffix?: string,
+): string {
   const used = new Set(taken);
-  const base =
+  const rawBase =
     (email ?? "account")
       .split("@")[0]
       .toLowerCase()
       .replace(/[^a-z0-9_-]+/g, "-")
       .replace(/^-+|-+$/g, "")
-      .slice(0, 28) || "account";
+      .slice(0, 24) || "account";
+  const base = suffix ? `${rawBase}-${suffix}` : rawBase;
   let name = base;
   for (let n = 2; used.has(name); n += 1) name = `${base}-${n}`;
   return name;
