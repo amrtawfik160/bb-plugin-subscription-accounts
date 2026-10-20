@@ -176,7 +176,7 @@ export const CLI_LOGIN_SPECS: Record<PoolProviderId, LoginSpec> = {
     env: { OPENAI_API_KEY: "", CODEX_API_KEY: "", CODEX_ACCESS_TOKEN: "" },
     needsCode: false,
     urlPattern: /https:\/\/auth\.openai\.com\/codex\/device\S*/,
-    userCodePattern: /\b([A-Z0-9]{4}-[A-Z0-9]{4})\b/,
+    userCodePattern: /\b([A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})+)\b/,
     windowMs: 15 * 60_000,
   },
 };

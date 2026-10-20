@@ -98,3 +98,16 @@ describe("Claude sign-in link", () => {
     }
   });
 });
+
+describe("Codex sign-in link and user code", () => {
+  it("matches the device URL and user codes printed by Codex CLI", async () => {
+    const { CLI_LOGIN_SPECS } = await import("./providers");
+    const { urlPattern, userCodePattern } = CLI_LOGIN_SPECS.codex;
+    expect(urlPattern.exec("https://auth.openai.com/codex/device")?.[0]).toBe("https://auth.openai.com/codex/device");
+    for (const code of ["ABCD-1234", "7CAQ-HDRQE", "7CK0-2Q5PX"]) {
+      const output = `Enter this one-time code (expires in 15 minutes)\n   ${code}\n`;
+      expect(userCodePattern?.exec(output)?.[1]).toBe(code);
+    }
+  });
+});
+
