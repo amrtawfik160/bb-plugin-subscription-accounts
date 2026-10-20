@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { formatDuration } from "./pool.js";
 import { historySchema } from "./history-schema.js";
 import { USAGE_TTL_MS, type AccountUsage, type UsageData, type UsageMetric } from "./usage-types.js";
 export { USAGE_TTL_MS } from "./usage-types.js";
@@ -46,6 +47,7 @@ export function emptyUsage(): AccountUsage {
 interface UsageEntry {
   value: AccountUsage;
   attemptedAt: number;
+  cooldownUntil?: number;
   pending?: Promise<void>;
 }
 
@@ -67,7 +69,10 @@ export class UsageCache {
     if (this.disposed) return Promise.resolve();
     const previous = this.entries.get(key);
     if (previous?.pending) return previous.pending;
-    if (!force && previous && this.now() - previous.attemptedAt < USAGE_TTL_MS) return Promise.resolve();
+    if (!force && previous) {
+      if (previous.cooldownUntil && this.now() < previous.cooldownUntil) return Promise.resolve();
+      if (this.now() - previous.attemptedAt < USAGE_TTL_MS) return Promise.resolve();
+    }
     const entry: UsageEntry = {
       value: { ...(previous?.value ?? emptyUsage()), refreshing: true, attemptedAt: this.now() },
       attemptedAt: this.now(),
@@ -76,6 +81,7 @@ export class UsageCache {
     entry.pending = Promise.resolve()
       .then(load)
       .then((data) => {
+        entry.cooldownUntil = undefined;
         entry.value = usageSchema.parse({
           ...data,
           ...(data.history
@@ -94,6 +100,12 @@ export class UsageCache {
         });
       })
       .catch((cause: unknown) => {
+        const retrySeconds = cause instanceof HttpError && cause.status === 429 ? cause.retryAfterSeconds : null;
+        if (retrySeconds && retrySeconds > 0) {
+          entry.cooldownUntil = this.now() + retrySeconds * 1000;
+        } else if (cause instanceof HttpError && cause.status === 429) {
+          entry.cooldownUntil = this.now() + USAGE_TTL_MS;
+        }
         entry.value = {
           ...entry.value,
           status: "error",
@@ -118,6 +130,36 @@ export class UsageCache {
 }
 
 export class UsageError extends Error {}
+
+export class HttpError extends UsageError {
+  constructor(
+    readonly status: number,
+    readonly retryAfterSeconds?: number | null,
+  ) {
+    super(
+      status === 401 || status === 403
+        ? "Usage access expired or was denied. Sign in again, then refresh."
+        : status === 429
+          ? retryAfterSeconds && retryAfterSeconds > 0
+            ? `Usage rate limit reached (HTTP 429). Try again in ${formatDuration(retryAfterSeconds * 1000)}.`
+            : "Usage rate limit reached (HTTP 429). Try again later."
+          : `Usage request failed (HTTP ${status}). Refresh to try again.`,
+    );
+  }
+}
+
+export function parseRetryAfter(response: Response): number | null {
+  const header = response.headers.get("retry-after");
+  if (!header) return null;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds > 0) return seconds;
+  const date = Date.parse(header);
+  if (Number.isFinite(date)) {
+    const diff = Math.ceil((date - Date.now()) / 1000);
+    return diff > 0 ? diff : null;
+  }
+  return null;
+}
 
 export function object(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)

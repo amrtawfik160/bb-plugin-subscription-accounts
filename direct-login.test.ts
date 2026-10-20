@@ -3,6 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   classifySubscriptionLimit,
   directLoginEnv,
+  fileLoginFor,
+  identifyClaudeStored,
+  captureClaude,
   stackLoginFromPooler,
 } from "./direct-login.js";
 
@@ -155,3 +158,162 @@ describe("stack logins copied from saved pooler accounts", () => {
     )).toBeNull();
   });
 });
+
+describe("claude team and personal subscription separation", () => {
+  const fileLogin = fileLoginFor("claude")!;
+
+  it("differentiates normal and team subscriptions under the same email", () => {
+    const personalStored = JSON.stringify({
+      kind: "claude-stack",
+      accountUuid: "u-123",
+      email: "user@example.com",
+      subscriptionType: "pro",
+      credentials: JSON.stringify({
+        claudeAiOauth: {
+          accessToken: "tok-personal",
+          refreshToken: "refresh-token-personal",
+          subscriptionType: "pro",
+        },
+      }),
+    });
+
+    const teamStoredWithOrg = JSON.stringify({
+      kind: "claude-stack",
+      accountUuid: "u-123",
+      organizationUuid: "org-456",
+      email: "user@example.com",
+      subscriptionType: "team",
+      credentials: JSON.stringify({
+        claudeAiOauth: {
+          accessToken: "tok-team",
+          refreshToken: "refresh-token-team",
+          organizationUuid: "org-456",
+          subscriptionType: "team",
+        },
+      }),
+    });
+
+    const teamStoredWithoutOrg = JSON.stringify({
+      kind: "claude-stack",
+      accountUuid: "u-123",
+      email: "user@example.com",
+      subscriptionType: "team",
+      credentials: JSON.stringify({
+        claudeAiOauth: {
+          accessToken: "tok-team2",
+          refreshToken: "refresh-token-team2",
+          subscriptionType: "team",
+        },
+      }),
+    });
+
+    expect(identifyClaudeStored(personalStored)).toEqual({
+      key: "u-123",
+      email: "user@example.com",
+      isTeam: false,
+    });
+    expect(identifyClaudeStored(teamStoredWithOrg)).toEqual({
+      key: "org-456",
+      email: "user@example.com",
+      isTeam: true,
+    });
+    expect(identifyClaudeStored(teamStoredWithoutOrg)).toEqual({
+      key: "u-123:team",
+      email: "user@example.com",
+      isTeam: true,
+    });
+  });
+
+  it("updates and cleans up organizationUuid in profileBytes on switch", () => {
+    const initialProfile = JSON.stringify({
+      numStartups: 5,
+      oauthAccount: {
+        accountUuid: "u-123",
+        emailAddress: "user@example.com",
+      },
+    });
+
+    const teamStored = JSON.stringify({
+      kind: "claude-stack",
+      accountUuid: "u-123",
+      organizationUuid: "org-456",
+      email: "user@example.com",
+      subscriptionType: "team",
+      credentials: "{}",
+    });
+
+    const personalStored = JSON.stringify({
+      kind: "claude-stack",
+      accountUuid: "u-123",
+      email: "user@example.com",
+      subscriptionType: "pro",
+      credentials: "{}",
+    });
+
+    const switchedToTeam = fileLogin.profileBytes(initialProfile, teamStored);
+    expect(JSON.parse(switchedToTeam!)).toEqual({
+      numStartups: 5,
+      oauthAccount: {
+        accountUuid: "u-123",
+        emailAddress: "user@example.com",
+        organizationUuid: "org-456",
+      },
+    });
+
+    const switchedBackToPersonal = fileLogin.profileBytes(switchedToTeam, personalStored);
+    expect(JSON.parse(switchedBackToPersonal!)).toEqual({
+      numStartups: 5,
+      oauthAccount: {
+        accountUuid: "u-123",
+        emailAddress: "user@example.com",
+      },
+    });
+  });
+
+  it("does not match team and personal accounts sharing the same email in sameLive", () => {
+    const personalLive = JSON.stringify({
+      claudeAiOauth: {
+        accessToken: "tok-personal",
+        refreshToken: "refresh-personal",
+        subscriptionType: "pro",
+      },
+    });
+    const personalProfile = JSON.stringify({
+      oauthAccount: {
+        accountUuid: "u-123",
+        emailAddress: "user@example.com",
+      },
+    });
+
+    const teamLive = JSON.stringify({
+      claudeAiOauth: {
+        accessToken: "tok-team",
+        refreshToken: "refresh-team",
+        subscriptionType: "team",
+      },
+    });
+    const teamProfile = JSON.stringify({
+      oauthAccount: {
+        accountUuid: "u-123",
+        emailAddress: "user@example.com",
+        organizationUuid: "org-456",
+      },
+    });
+
+    const teamMeta = { key: "org-456", email: "user@example.com" };
+    const personalMeta = { key: "u-123", email: "user@example.com" };
+
+    // Personal live does NOT match team meta, despite same email
+    expect(fileLogin.sameLive(teamMeta, personalLive, personalProfile)).toBe(false);
+
+    // Personal live matches personal meta
+    expect(fileLogin.sameLive(personalMeta, personalLive, personalProfile)).toBe(true);
+
+    // Team live matches team meta
+    expect(fileLogin.sameLive(teamMeta, teamLive, teamProfile)).toBe(true);
+
+    // Team live does NOT match personal meta
+    expect(fileLogin.sameLive(personalMeta, teamLive, teamProfile)).toBe(false);
+  });
+});
+

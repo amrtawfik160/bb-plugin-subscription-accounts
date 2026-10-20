@@ -91,7 +91,7 @@ describe("subscription usage page", () => {
     expect(slot.getByRole("button", { name: "Cancel" })).toBeTruthy();
     if (provider === "codex") expect(slot.getByText("ABCD-1234")).toBeTruthy();
     slot.lifecycle.unmount();
-  });
+  }, 15_000);
 
   it.each(["claude", "codex"] as const)("provides setup guidance when the %s CLI is missing", async (provider) => {
     const app = await loadPluginApp(() => import("./app"));

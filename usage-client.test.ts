@@ -88,6 +88,42 @@ describe("OpenUsage local quota fetching", () => {
     expect(save).not.toHaveBeenCalled();
   });
 
+  it("refreshes claude when the usage endpoint returns HTTP 429 and persists rotated credentials", async () => {
+    const save = vi.fn(async (_updated: string, _expected: string) => true);
+    const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("/token"))
+        return Response.json({
+          access_token: "new-access",
+          refresh_token: "new-refresh",
+          expires_in: 3600,
+        });
+      if (
+        new Headers(init?.headers).get("Authorization") ===
+        "Bearer old-access"
+      )
+        return new Response(null, { status: 429, headers: { "retry-after": "3600" } });
+      return Response.json({ five_hour: { utilization: 5 } });
+    });
+    const result = await createLocalUsageClient(fetcher as typeof fetch)(
+      "claude",
+      claude,
+      { save },
+    );
+    expect(result.metrics[0]).toMatchObject({ used: 5 });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    const persisted = JSON.parse(save.mock.calls[0][0]);
+    expect(persisted.claudeAiOauth.refreshToken).toBe("new-refresh");
+  });
+
+  it("formats rate limit error with retry-after duration when HTTP 429 persists", async () => {
+    const fetcher = vi.fn(async () =>
+      new Response(null, { status: 429, headers: { "retry-after": "1800" } }),
+    );
+    await expect(
+      createLocalUsageClient(fetcher as typeof fetch)("claude", claude),
+    ).rejects.toThrow("Usage rate limit reached (HTTP 429). Try again in 30m.");
+  });
+
   it("reads Codex quota and credit header fallbacks", async () => {
     const fetcher = vi.fn(async () =>
       Response.json(

@@ -31,7 +31,7 @@ export interface FileLogin {
   label: string;
   tokenPath: string;
   profilePath: string | null;
-  identify(stored: string): { key: string; email: string | null };
+  identify(stored: string): { key: string; email: string | null; isTeam?: boolean };
   liveBytes(stored: string): string;
   withCredentials(stored: string, credentials: string): string;
   profileBytes(profile: string | null, stored: string): string | null;
@@ -59,6 +59,7 @@ export interface PoolerSource {
   subscriptionType: string | null;
   rateLimitTier: string | null;
   accountUuid: string | null;
+  organizationUuid?: string | null;
   codexAccountId: string | null;
 }
 
@@ -93,12 +94,15 @@ const sourceSchema = z.object({
   subscriptionType: z.string().nullable().optional(),
   rateLimitTier: z.string().nullable().optional(),
   accountUuid: z.string().nullable().optional(),
+  organizationUuid: z.string().nullable().optional(),
   codexAccountId: z.string().nullable().optional(),
 });
 
 const claudeStackSchema = z.object({
   kind: z.literal("claude-stack"),
   accountUuid: z.string(),
+  organizationUuid: z.string().nullable().optional(),
+  subscriptionType: z.string().nullable().optional(),
   email: z.string().nullable(),
   credentials: z.string().min(1),
 });
@@ -129,6 +133,22 @@ function refreshTokenFromCredentials(credentials: string): string | null {
   const oauth = "claudeAiOauth" in parsed ? parsed.claudeAiOauth : undefined;
   if (!oauth || typeof oauth !== "object" || Array.isArray(oauth)) return null;
   return "refreshToken" in oauth ? text(oauth.refreshToken) : null;
+}
+
+function subscriptionTypeFromCredentials(credentials: string): string | null {
+  const parsed = parseJson(credentials);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const oauth = "claudeAiOauth" in parsed ? parsed.claudeAiOauth : undefined;
+  if (!oauth || typeof oauth !== "object" || Array.isArray(oauth)) return null;
+  return "subscriptionType" in oauth ? text(oauth.subscriptionType) : null;
+}
+
+function organizationUuidFromCredentials(credentials: string): string | null {
+  const parsed = parseJson(credentials);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const oauth = "claudeAiOauth" in parsed ? parsed.claudeAiOauth : undefined;
+  if (!oauth || typeof oauth !== "object" || Array.isArray(oauth)) return null;
+  return "organizationUuid" in oauth ? text(oauth.organizationUuid) : null;
 }
 
 function sameEmail(left: string | null, right: string | null): boolean {
@@ -181,7 +201,8 @@ export function stackLoginFromPooler(
   const row = source.data;
   const secret = oauthSecretSchema.safeParse(parseJson(secretJson));
   if (!secret.success) return null;
-  const name = nameFromEmail(row.email, taken);
+  const isTeam = row.subscriptionType === "team";
+  const name = nameFromEmail(row.email, taken, isTeam ? "team" : undefined);
   if (row.provider === "claude") {
     if (!row.accountUuid) return null;
     const credentials = JSON.stringify({
@@ -192,16 +213,23 @@ export function stackLoginFromPooler(
         scopes: CLAUDE_SCOPES,
         subscriptionType: row.subscriptionType ?? null,
         rateLimitTier: row.rateLimitTier ?? null,
+        ...(row.organizationUuid ? { organizationUuid: row.organizationUuid } : {}),
       },
     });
+    const key =
+      row.organizationUuid ||
+      (isTeam && row.accountUuid ? `${row.accountUuid}:team` : null) ||
+      row.accountUuid;
     return {
       provider: "claude",
       name,
-      key: row.accountUuid,
+      key,
       email: row.email,
       body: JSON.stringify({
         kind: "claude-stack",
         accountUuid: row.accountUuid,
+        organizationUuid: row.organizationUuid ?? null,
+        subscriptionType: row.subscriptionType ?? null,
         email: row.email,
         credentials,
       }),
@@ -227,15 +255,25 @@ export function stackLoginFromPooler(
   };
 }
 
-export function identifyClaudeStored(stored: string): { key: string; email: string | null } {
+export function identifyClaudeStored(stored: string): { key: string; email: string | null; isTeam?: boolean } {
   const envelope = parseEnvelope(stored);
   const credentials = envelope?.credentials ?? stored;
   const refresh = refreshTokenFromCredentials(credentials);
   if (!refresh) throw new Error("No refresh token. Sign in to Claude Code first.");
   if (!envelope) return { key: refresh.slice(-16), email: null };
+  const orgUuid = envelope.organizationUuid || organizationUuidFromCredentials(credentials);
+  const subType = envelope.subscriptionType || subscriptionTypeFromCredentials(credentials);
+  const isTeam = subType === "team";
+  const key =
+    orgUuid ||
+    (isTeam && envelope.accountUuid ? `${envelope.accountUuid}:team` : null) ||
+    envelope.accountUuid ||
+    envelope.email ||
+    refresh.slice(-16);
   return {
-    key: envelope.accountUuid || envelope.email || refresh.slice(-16),
+    key,
     email: envelope.email,
+    isTeam,
   };
 }
 
@@ -245,6 +283,8 @@ export function captureClaude(live: string, profile: string | null): string | nu
   return JSON.stringify({
     kind: "claude-stack",
     accountUuid: local.accountId ?? "",
+    organizationUuid: local.organizationUuid ?? null,
+    subscriptionType: subscriptionTypeFromCredentials(live),
     email: local.email,
     credentials: live,
   });
@@ -257,10 +297,19 @@ function claudeSame(
 ): boolean {
   const local = readClaudeLocal(live, profile);
   if (!local) return false;
-  if (local.accountId && local.accountId === meta.key) return true;
-  if (sameEmail(local.email, meta.email)) return true;
+  const subType = subscriptionTypeFromCredentials(live);
+  const liveKey =
+    local.organizationUuid ||
+    (subType === "team" && local.accountId ? `${local.accountId}:team` : null) ||
+    local.accountId;
+  if (liveKey && liveKey === meta.key) return true;
+  if (local.accountId && local.accountId === meta.key && !local.organizationUuid && subType !== "team") {
+    return true;
+  }
   const refresh = refreshTokenFromCredentials(live);
-  return Boolean(refresh && refresh.slice(-16) === meta.key);
+  if (refresh && refresh.slice(-16) === meta.key) return true;
+  if (meta.key === meta.email && sameEmail(local.email, meta.email)) return true;
+  return false;
 }
 
 const claudeFile: FileLogin = {
@@ -287,12 +336,22 @@ const claudeFile: FileLogin = {
       }
       for (const [key, value] of Object.entries(parsed)) existing[key] = value;
     }
+    const existingOauth = (existing.oauthAccount && typeof existing.oauthAccount === "object" && !Array.isArray(existing.oauthAccount))
+      ? existing.oauthAccount as Record<string, unknown>
+      : {};
+    const oauthAccount: Record<string, unknown> = {
+      ...existingOauth,
+      accountUuid: envelope.accountUuid,
+      emailAddress: envelope.email,
+    };
+    if (envelope.organizationUuid) {
+      oauthAccount.organizationUuid = envelope.organizationUuid;
+    } else {
+      delete oauthAccount.organizationUuid;
+    }
     return JSON.stringify({
       ...existing,
-      oauthAccount: {
-        accountUuid: envelope.accountUuid,
-        emailAddress: envelope.email,
-      },
+      oauthAccount,
     });
   },
   capture: captureClaude,
@@ -303,6 +362,8 @@ const claudeFile: FileLogin = {
     return JSON.stringify({
       kind: "claude-stack",
       accountUuid: local?.accountId || meta.key,
+      organizationUuid: local?.organizationUuid ?? null,
+      subscriptionType: subscriptionTypeFromCredentials(live),
       email: local?.email ?? meta.email,
       credentials: live,
     });

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  HttpError,
   mapAntigravity,
   mapClaude,
   mapCodex,
@@ -294,6 +295,26 @@ describe("usage cache", () => {
     cache.dispose();
     await cache.refresh("account", load, true);
     expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it("respects retry-after cooldown on rate limit before attempting background refresh", async () => {
+    let now = 1000;
+    const cache = new UsageCache(() => undefined, () => now);
+    const fail429 = vi.fn(async () => {
+      throw new HttpError(429, 3600);
+    });
+    await cache.refresh("account", fail429);
+    expect(cache.get("account").status).toBe("error");
+    expect(cache.get("account").error).toContain("HTTP 429");
+    expect(fail429).toHaveBeenCalledTimes(1);
+
+    now += USAGE_TTL_MS;
+    await cache.refresh("account", fail429);
+    expect(fail429).toHaveBeenCalledTimes(1);
+
+    now += 3600 * 1000;
+    await cache.refresh("account", fail429);
+    expect(fail429).toHaveBeenCalledTimes(2);
   });
 
   it("does not resurrect a removed account when an in-flight fetch completes", async () => {

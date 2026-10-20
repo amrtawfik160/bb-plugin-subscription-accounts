@@ -36,6 +36,7 @@ const accountSchema = z
     error: z.string().nullable().optional(),
     lastUsedAt: z.number().nullable().optional(),
     accountUuid: z.string().nullable().optional(),
+    organizationUuid: z.string().nullable().optional(),
     codexAccountId: z.string().nullable().optional(),
     observedAt: z.number().nullable().optional(),
   })
@@ -109,7 +110,7 @@ export function poolQuotaMetrics(
 export function poolAccountIdentity(account: PoolAccount): string | null {
   return textValue(
     account.provider === "claude"
-      ? account.accountUuid
+      ? account.organizationUuid ?? account.accountUuid
       : account.codexAccountId,
   );
 }
