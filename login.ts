@@ -97,6 +97,10 @@ export class LoginSession {
 
   async start(binaryPath: string): Promise<void> {
     await fs.mkdir(this.home, { recursive: true, mode: 0o700 });
+    await fs.mkdir(path.join(this.home, ".config"), { recursive: true, mode: 0o700 });
+    await fs.mkdir(path.join(this.home, ".claude"), { recursive: true, mode: 0o700 });
+    await fs.mkdir(path.join(this.home, ".codex"), { recursive: true, mode: 0o700 });
+    await fs.mkdir(path.dirname(path.join(this.home, this.tokenPath)), { recursive: true, mode: 0o700 });
     const command = [binaryPath, ...this.spec.args].map(quote).join(" ");
     const child = spawn("script", ["-qfc", command, "/dev/null"], {
       cwd: this.home,
@@ -125,7 +129,17 @@ export class LoginSession {
       this.fail(`Could not start the ${this.spec.binary} CLI on the bb server. Check that it is installed, then try again.`);
     });
     child.on("exit", () => {
-      if (this.finished || this.state.status !== "waiting") return;
+      if (this.finished) return;
+      if (this.state.status === "starting") {
+        const detail = this.output.trim().split("\n").filter(Boolean).pop();
+        this.fail(
+          detail
+            ? `The ${this.spec.binary} CLI stopped: ${detail}`
+            : `The ${this.spec.binary} CLI did not start a sign-in. Update it on the bb server, then try again.`,
+        );
+        return;
+      }
+      if (this.state.status !== "waiting") return;
       // Browser-poll CLIs exit once the browser step is done; give the file a moment.
       if (!this.spec.needsCode) {
         setTimeout(() => {
