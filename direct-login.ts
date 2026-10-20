@@ -265,9 +265,10 @@ export function identifyClaudeStored(stored: string): { key: string; email: stri
   const subType = envelope.subscriptionType || subscriptionTypeFromCredentials(credentials);
   const isTeam = subType === "team";
   const key =
-    orgUuid ||
+    (isTeam && orgUuid ? orgUuid : null) ||
     (isTeam && envelope.accountUuid ? `${envelope.accountUuid}:team` : null) ||
     envelope.accountUuid ||
+    orgUuid ||
     envelope.email ||
     refresh.slice(-16);
   return {
@@ -298,12 +299,15 @@ function claudeSame(
   const local = readClaudeLocal(live, profile);
   if (!local) return false;
   const subType = subscriptionTypeFromCredentials(live);
-  const liveKey =
-    local.organizationUuid ||
-    (subType === "team" && local.accountId ? `${local.accountId}:team` : null) ||
-    local.accountId;
+  const isTeam = subType === "team";
+  const liveKey = isTeam
+    ? (local.organizationUuid || (local.accountId ? `${local.accountId}:team` : null))
+    : (local.accountId || local.organizationUuid);
   if (liveKey && liveKey === meta.key) return true;
-  if (local.accountId && local.accountId === meta.key && !local.organizationUuid && subType !== "team") {
+  if (!isTeam && local.accountId && local.accountId === meta.key) {
+    return true;
+  }
+  if (isTeam && local.organizationUuid && local.organizationUuid === meta.key) {
     return true;
   }
   const refresh = refreshTokenFromCredentials(live);

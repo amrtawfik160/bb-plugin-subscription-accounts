@@ -1320,6 +1320,15 @@ export default async function plugin(bb: BbPluginApi) {
             active: state.active,
             accounts: state.order.map((name) => {
               const meta = state.accounts[name];
+              const entryUsage = usage.get(usageKey(id, name));
+              let plan = entryUsage.plan;
+              if (!plan && (id === "claude" || id === "codex")) {
+                const rawToken = readToken(id, name);
+                if (rawToken) {
+                  const local = id === "claude" ? readClaudeLocal(login.liveBytes(rawToken), null) : readCodexLocal(rawToken);
+                  plan = local?.plan ?? null;
+                }
+              }
               return {
                 name,
                 email: meta.email,
@@ -1330,7 +1339,7 @@ export default async function plugin(bb: BbPluginApi) {
                 addedAt: meta.addedAt,
                 usage: (() => {
                   refreshUsage(id, name).catch(logBackground);
-                  return usage.get(usageKey(id, name));
+                  return plan && !entryUsage.plan ? { ...entryUsage, plan } : entryUsage;
                 })(),
               };
             }),
