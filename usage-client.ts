@@ -211,8 +211,14 @@ export function createLocalUsageClient(
         try {
           await refresh();
           response = await attempt();
-        } catch {
-          // If refresh fails, fall through to reporting the rate limit error
+        } catch (error) {
+          if (
+            error instanceof UsageError &&
+            /sign in again|expired|invalid/i.test(error.message)
+          ) {
+            throw error;
+          }
+          // If refresh fails for other reasons, fall through to reporting the rate limit error
         }
       }
     }

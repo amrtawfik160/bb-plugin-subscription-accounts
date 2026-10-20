@@ -315,5 +315,26 @@ describe("claude team and personal subscription separation", () => {
     // Team live does NOT match personal meta
     expect(fileLogin.sameLive(personalMeta, teamLive, teamProfile)).toBe(false);
   });
+
+  it("matches personal accounts that have an organizationUuid in .claude.json", () => {
+    const personalLive = JSON.stringify({
+      claudeAiOauth: { accessToken: "tok", refreshToken: "ref", subscriptionType: "max" },
+    });
+    const personalProfileWithOrg = JSON.stringify({
+      oauthAccount: {
+        accountUuid: "u-123",
+        organizationUuid: "org-personal-default",
+        emailAddress: "user@example.com",
+      },
+    });
+    expect(
+      fileLogin.sameLive(
+        { key: "u-123", email: "user@example.com" },
+        personalLive,
+        personalProfileWithOrg,
+      ),
+    ).toBe(true);
+  });
 });
+
 
