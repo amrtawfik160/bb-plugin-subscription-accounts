@@ -59,7 +59,11 @@ import { HistoryCache } from "./history.js";
 import { sqliteHistoryStore } from "./history-store.js";
 import { PricingStore } from "./pricing.js";
 import { historySchema } from "./history-schema.js";
-import { quotaAccount, renderQuotas, type QuotaAccount, type QuotaReport } from "./quotas.js";
+import { quotaAccount, renderQuotas, renderQuotaSummary, summarizeQuotas, type QuotaAccount, type QuotaReport } from "./quotas.js";
+
+const QUOTA_USAGE = "bb subs quota [<provider>] [--refresh] [--full | --json] [--wait <seconds>]";
+/** Longest a quota command waits for fresh readings before it reports what it has. */
+const QUOTA_WAIT_SECONDS = 8;
 import {
   type PoolProviderId,
   SWAP_IDS,
@@ -1492,8 +1496,8 @@ export default async function plugin(bb: BbPluginApi) {
       },
       {
         name: "quota",
-        summary: "Show saved accounts' current plan and model quota remaining; unknown data stays unknown",
-        usage: "bb subs quota [<provider>] [--refresh] [--json]",
+        summary: "Show quota left on every saved account: a compact table for agents, with runway, issues and the account to use",
+        usage: QUOTA_USAGE,
       },
       {
         name: "add",
@@ -1526,8 +1530,12 @@ export default async function plugin(bb: BbPluginApi) {
       const force = argv.includes("--force");
       const fromIndex = argv.indexOf("--from");
       const from = fromIndex >= 0 ? argv[fromIndex + 1] : undefined;
+      const waitIndex = argv.indexOf("--wait");
       const positional = argv.filter(
-        (arg, index) => !arg.startsWith("--") && !(fromIndex >= 0 && index === fromIndex + 1),
+        (arg, index) =>
+          !arg.startsWith("--") &&
+          !(fromIndex >= 0 && index === fromIndex + 1) &&
+          !(waitIndex >= 0 && index === waitIndex + 1),
       );
       const [subcommand = "list", rawProvider, rawName] = positional;
       const provider = (): FileLogin => {
@@ -1539,22 +1547,32 @@ export default async function plugin(bb: BbPluginApi) {
       try {
         switch (subcommand) {
           case "quota": {
-            const unknownOption = argv.find((arg) => arg.startsWith("--") && arg !== "--json" && arg !== "--refresh");
-            if (unknownOption || rawName) throw new Error("Usage: bb subs quota [<provider>] [--refresh] [--json]");
+            const quotaUsage = `Usage: ${QUOTA_USAGE}`;
+            const unknownOption = argv.find((arg) => arg.startsWith("--") && !["--json", "--refresh", "--full", "--wait"].includes(arg));
+            const waitSeconds = waitIndex >= 0 ? Number(argv[waitIndex + 1]) : QUOTA_WAIT_SECONDS;
+            if (unknownOption || rawName || !(waitSeconds > 0 && waitSeconds <= 120)) throw new Error(quotaUsage);
             const chosen = rawProvider ? stackIdSchema.safeParse(rawProvider) : null;
             if (chosen && !chosen.success) throw new Error(`Provider must be one of ${stackList}.`);
             const ids = chosen?.success ? [chosen.data] : STACK_IDS;
-            const accounts: QuotaAccount[] = [];
-            for (const id of ids) {
+            const targets = (await Promise.all(ids.map(async (id) => {
               const state = await loadPool(id);
-              for (const name of state.order) {
-                await refreshUsage(id, name, argv.includes("--refresh"));
-                const meta = state.accounts[name];
-                accounts.push(quotaAccount({ provider: id, account: name, email: meta.email, active: state.active === name }, usage.get(usageKey(id, name)), Date.now()));
-              }
-            }
-            const report: QuotaReport = { now: Date.now(), accounts };
-            return done(json ? JSON.stringify(report, null, 2) : renderQuotas(report));
+              return state.order.map((name) => ({ id, name, email: state.accounts[name].email, active: state.active === name }));
+            }))).flat();
+            // Read every account at once and stop waiting at the time limit; a
+            // slow reading keeps loading in the background for the next call.
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            await Promise.race([
+              Promise.all(targets.map((t) => refreshUsage(t.id, t.name, argv.includes("--refresh")).catch(logBackground))),
+              new Promise((resolve) => { timer = setTimeout(resolve, waitSeconds * 1000); }),
+            ]);
+            clearTimeout(timer);
+            const now = Date.now();
+            const accounts: QuotaAccount[] = targets.map((t) =>
+              quotaAccount({ provider: t.id, account: t.name, email: t.email, active: t.active }, usage.get(usageKey(t.id, t.name)), now),
+            );
+            const report: QuotaReport = { now, accounts };
+            if (json) return done(JSON.stringify({ ...report, summary: summarizeQuotas(report) }));
+            return done(argv.includes("--full") ? renderQuotas(report) : renderQuotaSummary(report));
           }
           case "list": {
             const chosen = rawProvider ? stackIdSchema.safeParse(rawProvider) : null;

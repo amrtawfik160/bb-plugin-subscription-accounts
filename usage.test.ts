@@ -362,6 +362,29 @@ describe("usage requests", () => {
     expect(config).toHaveBeenCalledOnce();
     expect(JSON.stringify(result)).not.toMatch(/test-client|test-refresh|new-access/);
   });
+  it("adds Gemini from the model list when the shared limits report only the Claude group", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (url) =>
+      String(url).includes("retrieveUserQuotaSummary")
+        ? Response.json({ groups: [{ buckets: [{ bucketId: "3p-weekly", remainingFraction: 0.9 }] }] })
+        : String(url).includes("fetchAvailableModels")
+          ? Response.json({ models: {
+              "gemini-pro": { displayName: "Gemini Pro", quotaInfo: { remainingFraction: 0.4 } },
+              "claude-opus": { displayName: "Claude Opus", quotaInfo: { remainingFraction: 0.1 } },
+            } })
+          : Response.json({}),
+    );
+    const result = await createUsageClient(fetcher)(
+      "antigravity",
+      JSON.stringify({ token: { access_token: "access", refresh_token: "test-refresh" } }),
+      vi.fn(),
+    );
+    expect(result.metrics).toEqual([
+      expect.objectContaining({ label: "Gemini · 5 hours", remaining: 40, scope: { kind: "group", group: "Gemini" } }),
+      expect.objectContaining({ label: "Claude · weekly", remaining: 90, scope: { kind: "group", group: "Claude" } }),
+    ]);
+    expect(result.metrics[0]).not.toHaveProperty("derivedFromModels");
+    expect(result.modelQuotas).toBeUndefined();
+  });
   it("lists Antigravity models only when the shared limits are not reported", async () => {
     const fetcher = vi.fn<typeof fetch>().mockImplementation(async (url) =>
       String(url).includes("fetchAvailableModels")

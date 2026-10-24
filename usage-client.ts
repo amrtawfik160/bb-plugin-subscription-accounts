@@ -510,14 +510,21 @@ export function createUsageClient(
         if (cause instanceof HttpError && [401, 403].includes(cause.status)) throw cause;
       }
       // The four shared limits are the account's quota; list models only without them.
+      // Some plans report only the Claude group; Gemini then comes from the model list.
       const shared = mapAntigravity(summary);
+      const hasGemini = shared.some((row) => row.scope?.kind === "group" && row.scope.group === "Gemini");
       const [models, plan] = await Promise.all([
-        shared.length ? null : cloud("fetchAvailableModels"),
+        !shared.length ? cloud("fetchAvailableModels") : hasGemini ? null : optional(cloud("fetchAvailableModels")),
         optional(cloud("loadCodeAssist")),
       ]);
+      const gemini = shared.length && !hasGemini
+        ? mapAntigravity(null, models)
+            .filter((row) => row.label.startsWith("Gemini"))
+            .map(({ derivedFromModels: _, ...row }) => ({ ...row, windowMs: 5 * 3_600_000, scope: { kind: "group" as const, group: "Gemini" } }))
+        : [];
       return {
         plan: textValue(object(plan?.paidTier).name ?? object(plan?.currentTier).name),
-        metrics: shared.length ? shared : mapAntigravity(null, models),
+        metrics: shared.length ? [...gemini, ...shared] : mapAntigravity(null, models),
         ...(shared.length ? {} : { modelQuotas: mapAntigravityModelQuotas(models) }),
       };
     }
