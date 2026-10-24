@@ -227,7 +227,11 @@ export function mapAntigravity(summary: unknown, models: unknown = null): UsageM
         .find((b) => b.bucketId === id && number(b.remainingFraction) !== null);
       if (!bucket) return [];
       const fraction = Math.max(0, Math.min(1, number(bucket.remainingFraction)!));
-      return [{ ...metric(label, (1 - fraction) * 100, 100, "percent", timestamp(bucket.resetTime))!, scope: { kind: "group", group: id.startsWith("gemini") ? "Gemini" : "Claude" } }];
+      return [{
+        ...metric(label, (1 - fraction) * 100, 100, "percent", timestamp(bucket.resetTime))!,
+        windowMs: (id.endsWith("5h") ? 5 : 168) * 3_600_000,
+        scope: { kind: "group", group: id.startsWith("gemini") ? "Gemini" : "Claude" },
+      }];
     });
   }
   const pools = new Map<string, UsageMetric>();

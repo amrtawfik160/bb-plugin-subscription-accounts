@@ -124,13 +124,22 @@ The page covers everything. For scripts and agents there is `bb subs`:
 ```sh
 bb subs list [<provider>] [--json]         # every account and its quota state
 bb subs add <provider> [<name>]            # save the login the CLI is using now
-bb subs quota [<provider>] [--refresh] [--json] # current plan and model quota remaining
+bb subs quota [<provider>] [--refresh] [--full | --json] [--wait <seconds>] # quota left on every account
 bb subs add <provider> [<name>] --from <login-file> [--force]
 bb subs use <provider> <name>              # switch now
 bb subs next <provider>                    # mark the active account used up, switch
 bb subs reset <provider> [<name>]          # clear out-of-quota marks
 bb subs remove <provider> <name>
 ```
+
+`bb subs quota` prints a compact table for agents: one row per account and
+quota scope with the share left, the runway at the current pace, the reset time
+and the limit that binds it. Below it, `attention` lists accounts that need
+something (failed or old readings, almost out, running out before the reset)
+with the next step, and `pick` names the account to use per provider. It reads
+every account at once and waits at most 8 seconds (`--wait`); a slower reading
+shows as unknown and keeps loading for the next call. `--full` prints every
+window and `--json` adds the same summary under `summary`.
 
 `<provider>` is `antigravity`, `claude`, `codex`, `cursor` or `grok`. Claude and
 Codex use the same `add`, `use`, `next`, `reset` and `remove` commands. Sign in

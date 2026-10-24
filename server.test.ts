@@ -53,12 +53,24 @@ describe("subscription usage RPC", () => {
     const report = JSON.parse(result.stdout!);
     expect(report.accounts).toMatchObject([{ provider: "grok", account: "test", email: "test@example.com", active: true, status: "ready", limits: [{ label: "Weekly pool", remaining: 60, unit: "percent" }] }]);
     expect(report).not.toHaveProperty("catalogs");
+    expect(report.summary.rows).toMatchObject([{ provider: "grok", account: "test", inUse: true, scope: "all", percentLeft: 60, left: "60%" }]);
+    expect(report.summary.pick).toMatchObject([{ provider: "grok", account: "test", inUse: true }]);
     expect(result.stdout).not.toMatch(/available models|test-access|test-refresh/);
+    const compact = (await harness.behavior.runCli(["quota", "grok"])).stdout!;
+    expect(compact).toContain("quota[1]{provider,account,inUse,scope,left,runway,resetsAt,limitedBy}:");
+    expect(compact).toMatch(/^  grok,test,yes,all,60%,\w+,/m);
+    expect(compact).toContain("attention[0]");
+    expect(compact).not.toMatch(/test-access|test-refresh|test@example\.com/);
     fetcher.mockImplementation(async () => new Response("down", { status: 503 }));
     const failed = await harness.behavior.runCli(["quota", "grok", "--refresh", "--json"]);
     expect(JSON.parse(failed.stdout!).accounts[0]).toMatchObject({ status: "error", limits: [{ remaining: null, lastKnownRemaining: 60 }] });
-    expect((await harness.behavior.runCli(["quota", "grok"])).stdout).toContain("Weekly pool [account]: unknown left.");
+    expect((await harness.behavior.runCli(["quota", "grok", "--full"])).stdout).toContain("Weekly pool [account]: unknown left.");
+    const lost = (await harness.behavior.runCli(["quota", "grok"])).stdout!;
+    expect(lost).toMatch(/^  grok,test,yes,all,unknown \(last 60%\),unknown,/m);
+    expect(lost).toContain('grok,test,"error: Usage request failed (HTTP 503). Refresh to try again.",bb subs quota grok --refresh');
+    expect(lost).toContain("pick[0]");
     expect((await harness.behavior.runCli(["quota", "grok", "--refreh"])).exitCode).toBe(1);
+    expect((await harness.behavior.runCli(["quota", "grok", "--wait", "0"])).exitCode).toBe(1);
   });
 
   async function fakeGrokLogin(body: string) {

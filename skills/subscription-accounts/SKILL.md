@@ -10,7 +10,7 @@ scripts, use `bb subs`:
 
 ```sh
 bb subs list [<provider>] [--json]
-bb subs quota [<provider>] [--refresh] [--json]
+bb subs quota [<provider>] [--refresh] [--full | --json] [--wait <seconds>]
 bb subs add <antigravity|cursor|grok> [<name>] [--from <login-file>] [--force]
 bb subs use <provider> <name>
 bb subs next <provider>
@@ -30,7 +30,7 @@ reset times and credits when reported by the provider. Usage refreshes every
 five minutes; each account has a manual Refresh action. Local Claude/Codex
 logins show usage before import. Missing metrics are unavailable, not zero.
 A switching cooldown is separate from measured quota. Failed requests keep
-dated last-known readings. Use `bb subs quota --json` to inspect current plan,
+dated last-known readings. Use `bb subs quota` (compact) or `bb subs quota --json` to inspect current plan,
 group, and model limits. Use `--refresh` for a new reading. See
 `../subscription-quota/SKILL.md` for unknown data and shared-limit interpretation.
 The page's **Log in again** action renews that saved account through an
