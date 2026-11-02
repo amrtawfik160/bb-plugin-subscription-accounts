@@ -1046,6 +1046,64 @@ describe("Claude and Codex direct switching", () => {
     expect(again.swap.find((section) => section.id === "claude")?.accounts).toHaveLength(2);
   });
 
+  it("saves and switches between two Claude Team members in the same organization", async () => {
+    const harness = await host();
+    await writeClaude("access-amory", "uuid-amory", "amory@cyndra.ai", "org-cyndra", "team");
+    await harness.behavior.callRpc("saveCurrent", { provider: "claude" });
+    await writeClaude("access-amr", "uuid-amr", "amr@cyndra.ai", "org-cyndra", "team");
+    await harness.behavior.callRpc("saveCurrent", { provider: "claude" });
+
+    const overview = rpcContract.overview.output.parse(await harness.behavior.callRpc("overview", null));
+    const claude = overview.swap.find((section) => section.id === "claude")!;
+    expect(claude.accounts.map((account) => account.email)).toEqual(["amory@cyndra.ai", "amr@cyndra.ai"]);
+    expect(claude.active).toBe("amory-team");
+    expect(claude.live).toMatchObject({ email: "amr@cyndra.ai", saved: true });
+    expect(await harness.behavior.callRpc("saveCurrent", { provider: "claude" })).toEqual({ name: "amr-team" });
+
+    for (const member of ["amory", "amr", "amory"]) {
+      await harness.behavior.callRpc("use", { provider: "claude", name: `${member}-team` });
+      const credentials = JSON.parse(await fs.readFile(path.join(home!, ".claude/.credentials.json"), "utf8"));
+      const profile = JSON.parse(await fs.readFile(path.join(home!, ".claude.json"), "utf8"));
+      expect(credentials.claudeAiOauth.accessToken).toBe(`access-${member}`);
+      expect(profile.oauthAccount.accountUuid).toBe(`uuid-${member}`);
+      expect(profile.oauthAccount.organizationUuid).toBe("org-cyndra");
+    }
+  });
+
+  it("migrates a saved Team organization key without losing its login, name, or active selection", async () => {
+    home = await fs.mkdtemp(path.join(os.tmpdir(), "team-migration-"));
+    vi.spyOn(os, "homedir").mockReturnValue(home);
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({})));
+    const created = createFakePluginHost({
+      pluginId: "subscription-accounts",
+      dataDir: path.join(home, ".bb"),
+      sdk: { plugins: { list: async () => [] } },
+    });
+    dispose = () => created.harness.lifecycle.dispose();
+    await plugin(created.bb);
+    await writeClaude("access-amory", "uuid-amory", "amory@cyndra.ai", "org-cyndra", "team");
+    await created.harness.behavior.callRpc("saveCurrent", { provider: "claude" });
+    const state = await created.bb.storage.kv.get<import("./pool.js").PoolState>("pool:claude");
+    state!.accounts["amory-team"].key = "org-cyndra";
+    await created.bb.storage.kv.set("pool:claude", state);
+
+    const reloaded = await created.harness.lifecycle.reload(plugin);
+    dispose = () => reloaded.harness.lifecycle.dispose();
+    const beforeAdd = rpcContract.overview.output.parse(await reloaded.harness.behavior.callRpc("overview", null));
+    expect(beforeAdd.swap.find((section) => section.id === "claude")).toMatchObject({
+      active: "amory-team",
+      accounts: [{ name: "amory-team", email: "amory@cyndra.ai" }],
+      live: { saved: true },
+    });
+    await writeClaude("access-amr", "uuid-amr", "amr@cyndra.ai", "org-cyndra", "team");
+    expect(await reloaded.harness.behavior.callRpc("saveCurrent", { provider: "claude" })).toEqual({ name: "amr-team" });
+    await reloaded.harness.behavior.callRpc("use", { provider: "claude", name: "amory-team" });
+    const credentials = JSON.parse(await fs.readFile(path.join(home, ".claude/.credentials.json"), "utf8"));
+    expect(credentials.claudeAiOauth.accessToken).toBe("access-amory");
+    const again = rpcContract.overview.output.parse(await reloaded.harness.behavior.callRpc("overview", null));
+    expect(again.swap.find((section) => section.id === "claude")?.accounts).toHaveLength(2);
+  });
+
   it("preserves both Claude personal and team subscriptions with the same email and allows switching between them", async () => {
     const harness = await host();
     // 1. Save personal subscription

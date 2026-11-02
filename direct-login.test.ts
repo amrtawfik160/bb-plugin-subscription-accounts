@@ -162,6 +162,34 @@ describe("stack logins copied from saved pooler accounts", () => {
 describe("claude team and personal subscription separation", () => {
   const fileLogin = fileLoginFor("claude")!;
 
+  it.each([false, true])("keeps imported Team members distinct during credential sync (organization-only profile: %s)", (organizationOnly) => {
+    const saved = ["amory", "amr"].map((member) => stackLoginFromPooler({
+      id: member,
+      provider: "claude",
+      kind: "oauth",
+      email: `${member}@cyndra.ai`,
+      label: member,
+      enabled: true,
+      priority: 1,
+      subscriptionType: "team",
+      rateLimitTier: "default_claude_team_5x",
+      accountUuid: organizationOnly ? "org-cyndra" : `uuid-${member}`,
+      organizationUuid: "org-cyndra",
+      codexAccountId: null,
+    }, JSON.stringify({ kind: "oauth", accessToken: `access-${member}`, refreshToken: `refresh-${member}` }))!);
+    expect(saved[0].key).not.toBe(saved[1].key);
+
+    for (const account of saved) {
+      expect(fileLogin.identify(account.body).key).toBe(account.key);
+      const live = fileLogin.liveBytes(account.body);
+      const profile = fileLogin.profileBytes(null, account.body);
+      for (const target of saved) {
+        expect(fileLogin.sameLive(target, live, profile)).toBe(target === account);
+        expect(fileLogin.refreshStored(target, live, profile) !== null).toBe(target === account);
+      }
+    }
+  });
+
   it("differentiates normal and team subscriptions under the same email", () => {
     const personalStored = JSON.stringify({
       kind: "claude-stack",
@@ -213,7 +241,7 @@ describe("claude team and personal subscription separation", () => {
       isTeam: false,
     });
     expect(identifyClaudeStored(teamStoredWithOrg)).toEqual({
-      key: "org-456",
+      key: "u-123:team:org-456",
       email: "user@example.com",
       isTeam: true,
     });
@@ -300,7 +328,7 @@ describe("claude team and personal subscription separation", () => {
       },
     });
 
-    const teamMeta = { key: "org-456", email: "user@example.com" };
+    const teamMeta = { key: "u-123:team:org-456", email: "user@example.com" };
     const personalMeta = { key: "u-123", email: "user@example.com" };
 
     // Personal live does NOT match team meta, despite same email

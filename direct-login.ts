@@ -216,23 +216,20 @@ export function stackLoginFromPooler(
         ...(row.organizationUuid ? { organizationUuid: row.organizationUuid } : {}),
       },
     });
-    const key =
-      row.organizationUuid ||
-      (isTeam && row.accountUuid ? `${row.accountUuid}:team` : null) ||
-      row.accountUuid;
+    const body = JSON.stringify({
+      kind: "claude-stack",
+      accountUuid: row.accountUuid,
+      organizationUuid: row.organizationUuid ?? null,
+      subscriptionType: row.subscriptionType ?? null,
+      email: row.email,
+      credentials,
+    });
     return {
       provider: "claude",
       name,
-      key,
+      key: identifyClaudeStored(body).key,
       email: row.email,
-      body: JSON.stringify({
-        kind: "claude-stack",
-        accountUuid: row.accountUuid,
-        organizationUuid: row.organizationUuid ?? null,
-        subscriptionType: row.subscriptionType ?? null,
-        email: row.email,
-        credentials,
-      }),
+      body,
     };
   }
   if (!row.codexAccountId) return null;
@@ -264,9 +261,10 @@ export function identifyClaudeStored(stored: string): { key: string; email: stri
   const orgUuid = envelope.organizationUuid || organizationUuidFromCredentials(credentials);
   const subType = envelope.subscriptionType || subscriptionTypeFromCredentials(credentials);
   const isTeam = subType === "team";
+  const member = (envelope.accountUuid !== orgUuid ? envelope.accountUuid : null) ||
+    envelope.email?.toLowerCase() || refresh.slice(-16);
   const key =
-    (isTeam && orgUuid ? orgUuid : null) ||
-    (isTeam && envelope.accountUuid ? `${envelope.accountUuid}:team` : null) ||
+    (isTeam ? `${member}:team${orgUuid ? `:${orgUuid}` : ""}` : null) ||
     envelope.accountUuid ||
     orgUuid ||
     envelope.email ||
@@ -298,18 +296,9 @@ function claudeSame(
 ): boolean {
   const local = readClaudeLocal(live, profile);
   if (!local) return false;
-  const subType = subscriptionTypeFromCredentials(live);
-  const isTeam = subType === "team";
-  const liveKey = isTeam
-    ? (local.organizationUuid || (local.accountId ? `${local.accountId}:team` : null))
-    : (local.accountId || local.organizationUuid);
-  if (liveKey && liveKey === meta.key) return true;
-  if (!isTeam && local.accountId && local.accountId === meta.key) {
-    return true;
-  }
-  if (isTeam && local.organizationUuid && local.organizationUuid === meta.key) {
-    return true;
-  }
+  const captured = captureClaude(live, profile);
+  if (!captured) return false;
+  if (identifyClaudeStored(captured).key === meta.key) return true;
   const refresh = refreshTokenFromCredentials(live);
   if (refresh && refresh.slice(-16) === meta.key) return true;
   if (meta.key === meta.email && sameEmail(local.email, meta.email)) return true;
