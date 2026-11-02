@@ -987,6 +987,25 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
+  await serialized(async () => {
+    const state = await loadPool("claude");
+    const login = fileLoginFor("claude");
+    let updated = false;
+    for (const meta of Object.values(state.accounts)) {
+      const stored = readToken("claude", meta.name);
+      if (!stored) continue;
+      try {
+        const identity = login.identify(stored);
+        if (identity.isTeam && identity.key !== meta.key) {
+          meta.key = identity.key;
+          updated = true;
+        }
+      } catch {
+        // An unusable saved login still needs Log in again.
+      }
+    }
+    if (updated) await savePool("claude", state);
+  });
   await importDirectLogins();
 
   // ── page RPC ─────────────────────────────────────────────────────────────
